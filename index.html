@@ -1,0 +1,1099 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <script>document.documentElement.classList.add("js");
+</script>
+  
+<script>(() => {
+  const limit = 3, jobs = [], running = /* @__PURE__ */ new Map(), imageJobs = /* @__PURE__ */ new WeakMap();
+  const groups = /* @__PURE__ */ new Map(), registrations = [], critical = [];
+  const metrics = { limit, active: 0, peak: 0, firstScreenAt: null, records: [] };
+  let firstScreen = false, idle = 0, scanning = false;
+  let resolveFirst;
+  const ready = new Promise((resolve) => {
+    resolveFirst = resolve;
+  });
+  const owner = (element) => element?.closest?.("section,footer") || element;
+  const distance = (element) => {
+    const box = owner(element)?.getBoundingClientRect();
+    return box ? Math.max(0, box.top - innerHeight, -box.bottom) : 0;
+  };
+  const near = (element) => distance(element) <= innerHeight;
+  const assetURL = (value) => value.startsWith("apr-asset:") ? window.__apr.url(value.slice(10)) : value;
+  function pump() {
+    jobs.sort((a, b) => (a.critical ? -1e9 : a.urgent ? -1e8 : distance(a.element)) - (b.critical ? -1e9 : b.urgent ? -1e8 : distance(b.element)) || a.order - b.order);
+    while (metrics.active < limit && jobs.length && (firstScreen || jobs[0].critical)) {
+      const job = jobs.shift();
+      metrics.active++;
+      metrics.peak = Math.max(metrics.peak, metrics.active);
+      const record = { key: job.key, kind: job.kind, start: performance.now(), end: null };
+      metrics.records.push(record);
+      Promise.resolve().then(job.work).then((value) => {
+        if (job.kind === "decode" && value) Object.assign(record, value);
+        job.resolve(value);
+      }, (error) => {
+        record.error = String(error);
+        job.reject(error);
+      }).finally(() => {
+        record.end = performance.now();
+        metrics.active--;
+        running.delete(job.key);
+        pump();
+        idlePrefetch();
+      });
+    }
+  }
+  let sequence = 0;
+  function run(element, key, work, options = {}) {
+    if (running.has(key)) return running.get(key);
+    const promise = new Promise((resolve, reject) => {
+      jobs.push({ element, key, work, resolve, reject, order: sequence++, kind: options.kind || "init", critical: !!options.critical, urgent: !!options.urgent });
+    });
+    running.set(key, promise);
+    pump();
+    return promise;
+  }
+  let imageNumber = 0;
+  function image(element, isCritical = false) {
+    if (imageJobs.has(element)) return imageJobs.get(element);
+    const promise = run(element, "image-" + imageNumber++, async () => {
+      let decoded = element;
+      if (element.localName === "image") {
+        const ref = element.getAttribute("data-load-href") || element.getAttribute("href");
+        if (!ref) return;
+        decoded = new Image();
+        decoded.decoding = "async";
+        decoded.fetchPriority = isCritical ? "high" : near(element) ? "auto" : "low";
+        decoded.src = assetURL(ref);
+        await decoded.decode();
+        element.setAttribute("href", decoded.src);
+        element.removeAttribute("data-load-href");
+      } else {
+        for (const source of element.parentElement?.querySelectorAll("source[data-load-srcset]") || []) {
+          source.srcset = assetURL(source.dataset.loadSrcset);
+          delete source.dataset.loadSrcset;
+        }
+        element.loading = "eager";
+        element.decoding = "async";
+        element.fetchPriority = isCritical ? "high" : near(element) ? "auto" : "low";
+        if (element.dataset.loadSrc) {
+          element.src = assetURL(element.dataset.loadSrc);
+          delete element.dataset.loadSrc;
+        }
+        await element.decode();
+      }
+      element.dataset.loadReady = "true";
+      return { width: decoded.naturalWidth, height: decoded.naturalHeight };
+    }, { critical: isCritical, kind: "decode" }).catch((error) => {
+      element.dataset.loadError = "true";
+      console.warn("Image remains in its reserved slot:", error);
+    });
+    imageJobs.set(element, promise);
+    return promise;
+  }
+  function images(element, isCritical = false) {
+    return [...element.querySelectorAll("img[data-load-src],image[data-load-href]")].map((node) => image(node, isCritical));
+  }
+  function activate(registration) {
+    if (registration.active) return;
+    registration.active = true;
+    const waits = registration.options.images === false ? [] : images(registration.element, registration.options.critical);
+    Promise.all(waits).then(() => run(registration.element, registration.key, registration.work, registration.options)).then(
+      (value) => {
+        registration.element?.removeAttribute("aria-busy");
+        registration.resolve(value);
+      },
+      (error) => {
+        registration.element?.removeAttribute("aria-busy");
+        registration.reject(error);
+      }
+    );
+  }
+  function when(element, key, work, options = {}) {
+    if (!element) return Promise.resolve();
+    let registration;
+    const promise = new Promise((resolve, reject) => {
+      registration = { element, key, work, options, resolve, reject, active: false };
+    });
+    registrations.push(registration);
+    element.setAttribute("aria-busy", "true");
+    if (options.critical) {
+      critical.push(promise);
+      activate(registration);
+    } else if (firstScreen && near(element)) activate(registration);
+    return promise;
+  }
+  function loadGroup(group) {
+    if (!group || group.active) return;
+    group.active = true;
+    images(group.element);
+    registrations.filter((reg) => owner(reg.element) === group.element).forEach(activate);
+  }
+  function scan() {
+    scanning = false;
+    if (!firstScreen) return;
+    groups.forEach((group) => {
+      if (near(group.element)) loadGroup(group);
+    });
+    registrations.forEach((reg) => {
+      if (near(reg.element)) activate(reg);
+    });
+    pump();
+    idlePrefetch();
+  }
+  function scheduleScan() {
+    if (!scanning) {
+      scanning = true;
+      requestAnimationFrame(scan);
+    }
+  }
+  function idlePrefetch() {
+    if (!firstScreen || idle || jobs.length || metrics.active || document.hidden) return;
+    const next = [...groups.values()].filter((group) => !group.active).sort((a, b) => distance(a.element) - distance(b.element))[0];
+    if (!next) return;
+    const callback = () => {
+      idle = 0;
+      if (!document.hidden) {
+        loadGroup(next);
+        pump();
+        idlePrefetch();
+      }
+    };
+    idle = window.requestIdleCallback ? requestIdleCallback(callback) : setTimeout(callback, 100);
+  }
+  async function start() {
+    for (const element of document.querySelectorAll("section,footer")) groups.set(element, { element, active: false });
+    const primary = [...document.querySelectorAll("#top img,#problem img,#problem image")].map((element) => image(element, true));
+    await Promise.allSettled([...primary, ...critical, document.fonts.ready]);
+    metrics.firstScreenAt = performance.now();
+    resolveFirst();
+    requestAnimationFrame(() => {
+      firstScreen = true;
+      if ("IntersectionObserver" in window) {
+        const observer = new IntersectionObserver((entries) => {
+          entries.filter((entry) => entry.isIntersecting).forEach((entry) => loadGroup(groups.get(entry.target)));
+          pump();
+        }, { rootMargin: `${innerHeight}px 0px` });
+        groups.forEach((group) => observer.observe(group.element));
+      }
+      scan();
+    });
+  }
+  window.aprLoad = { when, run, image, ready, metrics, get pending() {
+    return jobs.length;
+  } };
+  addEventListener("scroll", scheduleScan, { passive: true });
+  addEventListener("resize", scheduleScan, { passive: true });
+  document.addEventListener("visibilitychange", scheduleScan);
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start, { once: true });
+  else start();
+})();
+</script>
+
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="theme-color" content="#ffffff">
+  <title>APR · Evaluating Physical Reasoning in LLM Agents</title>
+  <meta name="description" content="Evaluating Physical Reasoning in LLM Agents Requires Construction Benchmarks. NeurIPS 2026 Position Paper Track.">
+  <link rel="icon" href="assets/favicon-32.png" type="image/png" sizes="32x32">
+  <link rel="icon" href="assets/favicon.svg?v=38c400340cb47d43" type="image/svg+xml" sizes="any">
+  <link rel="apple-touch-icon" href="assets/apple-touch-icon.png" sizes="180x180">
+  <link rel="preload" href="assets/fonts/OpenSans-SemiCondensedRegular.ttf" as="font" type="font/ttf" crossorigin>
+  <link rel="preload" href="assets/fonts/OpenSans-SemiCondensedBold.ttf" as="font" type="font/ttf" crossorigin>
+  <link rel="preload" href="assets/fonts/OpenSans-SemiCondensedMedium.ttf" as="font" type="font/ttf" crossorigin>
+  <link rel="preload" href="assets/fonts/OpenSans-SemiCondensedExtraBold.ttf" as="font" type="font/ttf" crossorigin>
+  <link rel="stylesheet" href="css/site.css?v=38c400340cb47d43">
+  <link rel="stylesheet" href="css/agentic-loop.css?v=38c400340cb47d43">
+  <link rel="stylesheet" href="css/nearterm.css?v=38c400340cb47d43">
+  <link rel="stylesheet" href="assets/rsi/rsi.css?v=38c400340cb47d43">
+  
+  <script>(function() {
+  var root = document.documentElement;
+  function reveal() {
+    root.classList.add("fonts-ready");
+  }
+  if (!document.fonts) {
+    reveal();
+    return;
+  }
+  Promise.allSettled([400, 500, 700, 800].map(function(weight) {
+    return document.fonts.load(weight + ' 18px "Open Sans SemiCondensed"');
+  })).then(function() {
+    requestAnimationFrame(reveal);
+  });
+})();
+</script>
+  <script src="assets/rsi/rsi.js?v=38c400340cb47d43" defer></script>
+  <script src="js/nearterm.js?v=38c400340cb47d43" type="module"></script>
+  <script src="js/missions.js?v=38c400340cb47d43" type="module"></script>
+  <script src="js/loop-scroll.js?v=38c400340cb47d43" type="module"></script>
+  <script src="js/hatching.js?v=38c400340cb47d43" defer></script>
+  <script src="js/safety.js?v=38c400340cb47d43" defer></script>
+  <script src="js/page.js?v=38c400340cb47d43" defer></script>
+  <script src="js/audit.js?v=38c400340cb47d43" defer></script>
+  <script src="js/physics.js?v=38c400340cb47d43" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="hero" id="top">
+    <img class="hero-lab-watermark" src="assets/brand/lab-mono.svg" alt="" aria-hidden="true" width="457" height="464">
+    <div class="wrap hero-content">
+      <div class="brand">
+        <a class="conference-mark" href="https://neurips.cc/Conferences/2026" target="_blank" rel="noopener" aria-label="NeurIPS 2026 (opens in a new tab)"><img src="assets/brand/neurips-mono.svg" alt="NeurIPS" width="36" height="25"></a>
+        <a class="mark" href="#top" aria-label="APR home">APR<span class="apr-dot" aria-hidden="true">.</span></a>
+        <span class="brand-name"><strong>A</strong>gentic <strong>P</strong>hysical <strong>R</strong>easoning</span>
+      </div>
+      <p class="venue">NeurIPS 2026 <span aria-hidden="true">/</span> Position Paper Track</p>
+      <h1>Evaluating Physical Reasoning in LLM Agents Requires <span>Construction Benchmarks</span></h1>
+      <div class="links" role="group" aria-label="Paper and resources">
+        <a class="btn primary" href="https://openreview.net/forum?id=42PVaAYxLX" target="_blank" rel="noopener">Paper</a>
+        <a class="btn" href="#awesome-apr"><span>Awesome APR<span class="apr-dot" aria-hidden="true">.</span></span></a>
+        <span class="btn-reveal"><a class="btn" href="https://build-arena.github.io/" target="_blank" rel="noopener">BuildArena</a><a class="btn btn-more" href="https://build-arena.github.io/ConstructionChallenge/" target="_blank" rel="noopener">BuildArena 2.0</a></span>
+      </div>
+      <div class="byline">
+        <p class="authors">
+          <span>Wenhao Deng<sup>1,2,3</sup></span>
+          <span>Tian Xia<sup>1,2</sup></span>
+          <span>Yuru Jiang<sup>1</sup></span>
+          <span>Joemon M. Jose<sup>3</sup></span>
+          <span>Tailin Wu<sup>1,2,†</sup></span>
+        </p>
+        <ol class="affiliations">
+          <li><sup>1</sup> School of Engineering, Westlake University</li>
+          <li><sup>2</sup> Uniforce AI</li>
+          <li><sup>3</sup> School of Computing Science, University of Glasgow</li>
+        </ol>
+        <p class="author-notes"><a href="https://ai4s.lab.westlake.edu.cn/" target="_blank" rel="noopener">AI for Scientific Simulation and Discovery Lab</a><span>† Corresponding author.</span></p>
+      </div>
+    </div>
+  </header>
+
+  <main id="main">
+    <div class="wrap abstract-area">
+      <details class="abstract" id="abstract">
+        <summary><span class="abstract-label">Abstract</span><span class="abstract-toggle" aria-hidden="true"></span></summary>
+        <p id="abstract-text">Physical reasoning is central to agents that step into the physical world. Models now excel at code and math, but their physical reasoning capabilities remain largely untested. Existing physical benchmarks evaluate goal-state matching rather than functional performance. This position paper argues that evaluating physical reasoning in LLM agents requires construction benchmarks, where physics verifies functional outcomes. To operationalize physical reasoning evaluation, we identify five capabilities spanning the full agentic loop from goal to verified artifact. Our audit of eleven physical benchmarks finds that the only two combining realistic physics with functional verification, the minimum requirements for testing physical reasoning, are construction benchmarks. Neither covers all five capabilities, yet both already show current models failing as task complexity increases. Progress depends on the breadth of benchmarks. We call on academia, game studios, and industry labs to expand construction benchmarks along both axes, widening capability coverage and deepening physical challenges. Their breadth determines how fully agents move from code and math to reshaping the physical world.</p>
+      </details>
+      
+      <script>(function() {
+  var d = document.getElementById("abstract");
+  if (d && (location.hash === "#abstract" || matchMedia("(min-width: 761px)").matches)) d.open = true;
+})();
+</script>
+    </div>
+
+    <section class="block" id="problem" aria-labelledby="problem-title">
+      <div class="wrap">
+        <div class="section-intro">
+          <h2 id="problem-title">The verification problem</h2>
+          <p class="lede">Current physical benchmarks evaluate goal-state matching rather than functional outcomes, the equivalent of checking syntax instead of running code.</p>
+        </div>
+        <figure class="physics-figure" data-simulation="data/newfig1_pull_sim.json">
+          <noscript><div class="figure-static">
+            <img class="static-wide" src="assets/physical-benchmark-gaps.svg" alt="Two physical benchmark gaps: a structure matches the goal configuration but collapses under physics; an error ignored by simplified physics propagates under realistic physics." width="396" height="90" fetchpriority="high">
+            <div class="static-stacked">
+              <svg viewBox="0 0 196.5 90" role="img" aria-label="The goal-state configuration can match while the structure fails under physics."><image href="assets/physical-benchmark-gaps.svg" width="396" height="90"/></svg>
+              <svg viewBox="197 0 199 90" role="img" aria-label="Simplified physics leaves blocks suspended; realistic physics propagates the error."><image href="assets/physical-benchmark-gaps.svg" width="396" height="90"/></svg>
+            </div>
+          </div></noscript>
+          <div class="physics-panels">
+            <div class="physics-panel" id="physics-a">
+              <div class="panel-heading"><h3><span>(a)</span> Goal-state matching vs. functional verification</h3></div>
+              <svg id="beam-scene" viewBox="0 0 600 245" role="img" aria-label="Goal-state matching versus functional verification" aria-describedby="beam-desc">
+                <desc id="beam-desc">A yellow beam and square match the goal configuration. Under physics, the beam pivots on the column until its right end touches the ground. The square then slides to the beam end and tips over the edge.</desc>
+                <defs><pattern id="floor-hatch" width="18" height="18" patternUnits="userSpaceOnUse"><path d="M0 18L18 0" stroke="#2c557b" stroke-width="1.4"/></pattern></defs>
+                <text class="scene-status" data-beam-step="matched" data-active="true" x="121" y="30" text-anchor="middle">✓ matches the goal configuration</text>
+                <text class="scene-status" data-beam-step="running" x="294.5" y="134" text-anchor="middle">run physics</text>
+                <text class="scene-status" data-beam-step="failed" x="486" y="30" text-anchor="middle">✗ fails the functional test</text>
+                <svg class="physics-mascot" x="8" y="75" width="76.136" height="125" viewBox="665 208 1340 2200" aria-hidden="true"><image id="beam-mascot" href="assets/poses/reach_place_three_quarter_right.png" width="2600" height="2600"/></svg>
+                <g id="exclamation-cue" transform="translate(45 70) rotate(16)" fill="white" stroke="#2c557b" stroke-width="3" stroke-linejoin="round" opacity="0" aria-hidden="true"><g transform="scale(.53)"><path d="M-8.64 -48H8.64L3.6 -17.28H-3.6Z"/><circle cx="0" cy="-5.76" r="5.04"/></g></g>
+                <g transform="translate(-20 48.95) scale(.53)">
+                  <g stroke="#2c557b" stroke-width="3" stroke-linejoin="round">
+                    <path d="M205 285H525" fill="none"/>
+                    <rect x="205" y="286" width="320" height="14" fill="url(#floor-hatch)" stroke="none"/>
+                    <rect x="230" y="157.4" width="40.6" height="127.6" fill="white"/>
+                    <rect x="230" y="128.4" width="226.2" height="29" fill="#f1dd91"/>
+                    <rect x="318.45" y="79.1" width="49.3" height="49.3" fill="#f1dd91"/>
+                    <g id="goal-ghost" fill="none" stroke="#8aa0b8" stroke-width="1.4" stroke-dasharray="4 4"><rect x="224" y="122.4" width="238.2" height="41"/><rect x="312.45" y="73.1" width="61.3" height="61.3"/></g>
+                  </g>
+                </g>
+                <path id="physics-arrow" d="M276 151H312M304 145L313 151L304 157" fill="none" stroke="#7792a9" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+                <g transform="translate(299 48.95) scale(.53)">
+                  <g stroke="#2c557b" stroke-width="3" stroke-linejoin="round">
+                    <path d="M205 285H565" fill="none"/>
+                    <rect x="205" y="286" width="360" height="14" fill="url(#floor-hatch)" stroke="none"/>
+                    <rect id="column" x="230" y="157.4" width="40.6" height="127.6" fill="white"/>
+                    <polygon id="beam" points="230.000,157.400 456.200,157.400 456.200,128.400 230.000,128.400" fill="#f1dd91"/>
+                    <polygon id="beam-block" points="318.450,128.400 367.750,128.400 367.750,79.100 318.450,79.100" fill="#f1dd91"/>
+                  </g>
+                  <path id="tip-cue" d="M493 216Q528 227 516 253M510 245L516 253L523 246" fill="none" stroke="#809ab3" stroke-width="2" opacity="0"/>
+                </g>
+              </svg>
+            </div>
+            <div class="physics-panel" id="physics-b">
+              <div class="panel-heading"><h3><span>(b)</span> Simplified physics breaks the causal chain</h3></div>
+              <svg id="pull-scene" viewBox="0 0 600 245" role="img" aria-label="Simplified and realistic physics after removing a support" aria-describedby="pull-desc">
+                <desc id="pull-desc">In simplified physics two blocks stay suspended above a dashed gap marker while a puzzled mascot scratches its head. In realistic physics the same support removal topples the first stack into the second, displacing its upper two blocks. Poses are replayed directly from the source simulation.</desc>
+                <text class="scene-label" x="163" y="30" text-anchor="middle">simplified physics</text>
+                <text class="scene-label" x="465" y="30" text-anchor="middle">realistic physics</text>
+                <g id="puzzled-mascot" aria-hidden="true"><svg class="physics-mascot" x="8" y="75" width="76.136" height="125" viewBox="665 208 1340 2200"><image id="pull-mascot" href="assets/poses/reach_place_three_quarter_right.png" width="2600" height="2600"/></svg></g>
+                <g id="question-cue" transform="translate(45 70) rotate(-16)" fill="white" stroke="#2c557b" stroke-linejoin="round" opacity="0" aria-hidden="true"><g transform="scale(12.72 -12.72)" stroke-width=".125786"><path d="M-.16 .72H.16C.16 .90 .22 1.00 .40 1.11C.72 1.30 .83 1.55 .65 1.78C.50 1.96 .18 2.04 -.12 1.98C-.43 1.92 -.62 1.73 -.60 1.48H-.24C-.24 1.58 -.13 1.67 .02 1.67C.19 1.67 .31 1.60 .31 1.49C.31 1.39 .23 1.34 .09 1.25C-.10 1.11 -.16 .94 -.16 .72Z"/><circle cx="0" cy=".24" r=".21"/></g></g>
+                <g stroke="#2c557b" stroke-width="2"><path d="M94 200H263M396 200H593" fill="none"/><g id="simplified-blocks"><rect data-block="support" x="-17.5" y="-17.5" width="35" height="35" transform="translate(180.000000000 182.500000000) rotate(-0.000000000)" fill="#c86f42"/><rect data-block="a_middle" x="-17.5" y="-17.5" width="35" height="35" transform="translate(179.999999976 147.500033876) rotate(0.000000017)" fill="white"/><rect data-block="a_top" x="-17.5" y="-17.5" width="35" height="35" transform="translate(179.999998301 112.500066594) rotate(-0.000006016)" fill="white"/><rect data-block="b_bottom" x="-17.5" y="-17.5" width="35" height="35" transform="translate(225.500000240 182.500011266) rotate(-0.000002091)" fill="white"/><rect data-block="b_middle" x="-17.5" y="-17.5" width="35" height="35" transform="translate(225.499999522 147.500045119) rotate(-0.000003037)" fill="white"/><rect data-block="b_top" x="-17.5" y="-17.5" width="35" height="35" transform="translate(225.499996697 112.500066351) rotate(0.000001602)" fill="white"/></g><g id="realistic-blocks"><rect data-block="support" x="-17.5" y="-17.5" width="35" height="35" transform="translate(482.000000000 182.500000000) rotate(-0.000000000)" fill="#c86f42"/><rect data-block="a_middle" x="-17.5" y="-17.5" width="35" height="35" transform="translate(481.999999976 147.500033876) rotate(0.000000017)" fill="white"/><rect data-block="a_top" x="-17.5" y="-17.5" width="35" height="35" transform="translate(481.999998301 112.500066594) rotate(-0.000006016)" fill="white"/><rect data-block="b_bottom" x="-17.5" y="-17.5" width="35" height="35" transform="translate(527.500000240 182.500011266) rotate(-0.000002091)" fill="white"/><rect data-block="b_middle" x="-17.5" y="-17.5" width="35" height="35" transform="translate(527.499999522 147.500045119) rotate(-0.000003037)" fill="white"/><rect data-block="b_top" x="-17.5" y="-17.5" width="35" height="35" transform="translate(527.499996697 112.500066351) rotate(0.000001602)" fill="white"/></g></g>
+                <g id="gap-cue" stroke="#c2653a" fill="none" stroke-width="2" stroke-dasharray="3 3" stroke-linecap="butt" opacity="0" aria-hidden="true"><path d="M162.5 171H197.5"/><path d="M180 171V194"/><path d="M162.5 194H197.5"/></g>
+                <text class="scene-outcome" x="180" y="231" text-anchor="middle">no consequence</text>
+                <text class="scene-outcome" x="482" y="231" text-anchor="middle">error propagates</text>
+              </svg>
+            </div>
+          </div>
+          <figcaption>Two gaps in current physical benchmarks.</figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section class="block" id="safety" aria-labelledby="safety-title">
+      <div class="wrap">
+        <div class="section-intro">
+          <h2 id="safety-title">The safety problem</h2>
+          <p class="lede">Grounding LLM agents in the physical world makes physical reasoning a safety problem first.</p>
+        </div>
+        
+        <div class="safety-panels">
+          <figure class="safety-panel">
+            <figcaption><span class="safety-tag">(a)</span> <span id="safety-a-title" class="safety-title">Goal: the wrench in the engineer's hand</span></figcaption>
+            <svg class="safety-art" viewBox="0 0 1166 400" role="img" aria-labelledby="safety-a-title" data-safety-panel="a">
+              <path d="M 14 330.0 H 1152" class="safety-line"/><path d="M 26 332 l -9 10 M 39 332 l -9 10 M 52 332 l -9 10 M 65 332 l -9 10 M 78 332 l -9 10 M 91 332 l -9 10 M 104 332 l -9 10 M 117 332 l -9 10 M 130 332 l -9 10 M 143 332 l -9 10 M 156 332 l -9 10 M 169 332 l -9 10 M 182 332 l -9 10 M 195 332 l -9 10 M 208 332 l -9 10 M 221 332 l -9 10 M 234 332 l -9 10 M 247 332 l -9 10 M 260 332 l -9 10 M 273 332 l -9 10 M 286 332 l -9 10 M 299 332 l -9 10 M 312 332 l -9 10 M 325 332 l -9 10 M 338 332 l -9 10 M 351 332 l -9 10 M 364 332 l -9 10 M 377 332 l -9 10 M 390 332 l -9 10 M 403 332 l -9 10 M 416 332 l -9 10 M 429 332 l -9 10 M 442 332 l -9 10 M 455 332 l -9 10 M 468 332 l -9 10 M 481 332 l -9 10 M 494 332 l -9 10 M 507 332 l -9 10 M 520 332 l -9 10 M 533 332 l -9 10 M 546 332 l -9 10 M 559 332 l -9 10 M 572 332 l -9 10 M 585 332 l -9 10 M 598 332 l -9 10 M 611 332 l -9 10 M 624 332 l -9 10 M 637 332 l -9 10 M 650 332 l -9 10 M 663 332 l -9 10 M 676 332 l -9 10 M 689 332 l -9 10 M 702 332 l -9 10 M 715 332 l -9 10 M 728 332 l -9 10 M 741 332 l -9 10 M 754 332 l -9 10 M 767 332 l -9 10 M 780 332 l -9 10 M 793 332 l -9 10 M 806 332 l -9 10 M 819 332 l -9 10 M 832 332 l -9 10 M 845 332 l -9 10 M 858 332 l -9 10 M 871 332 l -9 10 M 884 332 l -9 10 M 897 332 l -9 10 M 910 332 l -9 10 M 923 332 l -9 10 M 936 332 l -9 10 M 949 332 l -9 10 M 962 332 l -9 10 M 975 332 l -9 10 M 988 332 l -9 10 M 1001 332 l -9 10 M 1014 332 l -9 10 M 1027 332 l -9 10 M 1040 332 l -9 10 M 1053 332 l -9 10 M 1066 332 l -9 10 M 1079 332 l -9 10 M 1092 332 l -9 10 M 1105 332 l -9 10 M 1118 332 l -9 10 M 1131 332 l -9 10 M 1144 332 l -9 10 " class="safety-hatch"/>
+              <image data-load-href="assets/safety/human_gen.webp?v=38c400340cb47d43" x="148.7" y="38.7" width="355.6" height="292.9"/>
+              <image data-load-href="assets/safety/cart.webp?v=38c400340cb47d43" x="975" y="185.9" width="155.7" height="144.1"/>
+              <image data-load-href="assets/safety/bot_nowrench.webp?v=38c400340cb47d43" x="846.0" y="88.0" width="120.7" height="245.0"/>
+              <path class="safety-tool" d="M -9.8 -3.7 L -9.1 -5.2 L -8.3 -6.4 L -7.3 -7.6 L -6.1 -8.6 L -4.7 -9.4 L -3.3 -10.0 L -1.8 -10.3 L -0.2 -10.5 L 1.3 -10.4 L 2.8 -10.1 L 4.3 -9.6 L 5.6 -8.9 L 6.9 -7.9 L 8.0 -6.8 L 8.9 -5.6 L 9.6 -4.2 L 9.6 -4.2 L 57.8 -4.2 L 57.8 -4.2 L 58.9 -4.1 L 59.9 -3.6 L 60.8 -3.0 L 61.4 -2.1 L 61.9 -1.1 L 62.0 0.0 L 61.9 1.1 L 61.4 2.1 L 60.8 3.0 L 59.9 3.6 L 58.9 4.1 L 57.8 4.2 L 9.6 4.2 L 9.6 4.2 L 8.9 5.6 L 8.0 6.8 L 6.9 7.9 L 5.6 8.9 L 4.3 9.6 L 2.8 10.1 L 1.3 10.4 L -0.2 10.5 L -1.8 10.3 L -3.3 10.0 L -4.7 9.4 L -6.1 8.6 L -7.3 7.6 L -8.3 6.4 L -9.1 5.2 L -9.8 3.7 L -9.8 3.8 L -2.3 3.8 L -2.3 -3.8 L -9.8 -3.8 Z" transform="translate(954.1 113.6) rotate(90)"/>
+              <path d="M 822.3 122.5 l -10.3 3.8" class="safety-line"/><path d="M 821.9 112.9 l -10.6 -2.8" class="safety-line"/><path d="M 827.0 104.7 l -7.1 -8.4" class="safety-line"/>
+              <path id="safety-arc" class="safety-plan" d="M 954.1 101.6 Q 727.4 -57.3 500.7 117.0"/>
+              <path class="safety-plan safety-wrench" d="M -9.8 -3.7 L -9.1 -5.2 L -8.3 -6.4 L -7.3 -7.6 L -6.1 -8.6 L -4.7 -9.4 L -3.3 -10.0 L -1.8 -10.3 L -0.2 -10.5 L 1.3 -10.4 L 2.8 -10.1 L 4.3 -9.6 L 5.6 -8.9 L 6.9 -7.9 L 8.0 -6.8 L 8.9 -5.6 L 9.6 -4.2 L 9.6 -4.2 L 57.8 -4.2 L 57.8 -4.2 L 58.9 -4.1 L 59.9 -3.6 L 60.8 -3.0 L 61.4 -2.1 L 61.9 -1.1 L 62.0 0.0 L 61.9 1.1 L 61.4 2.1 L 60.8 3.0 L 59.9 3.6 L 58.9 4.1 L 57.8 4.2 L 9.6 4.2 L 9.6 4.2 L 8.9 5.6 L 8.0 6.8 L 6.9 7.9 L 5.6 8.9 L 4.3 9.6 L 2.8 10.1 L 1.3 10.4 L -0.2 10.5 L -1.8 10.3 L -3.3 10.0 L -4.7 9.4 L -6.1 8.6 L -7.3 7.6 L -8.3 6.4 L -9.1 5.2 L -9.8 3.7 L -9.8 3.8 L -2.3 3.8 L -2.3 -3.8 L -9.8 -3.8 Z" transform="translate(476.7 117.0) rotate(-6)"/>
+              <g class="safety-flying" visibility="hidden">
+                <animateMotion id="safetyFlight" dur="1.3s" begin="indefinite" fill="freeze"><mpath href="#safety-arc"/></animateMotion>
+                <set attributeName="visibility" to="visible" begin="safetyFlight.begin" end="safetyFlight.end" dur="1.3s"/>
+                <path class="safety-plan safety-wrench" d="M -9.8 -3.7 L -9.1 -5.2 L -8.3 -6.4 L -7.3 -7.6 L -6.1 -8.6 L -4.7 -9.4 L -3.3 -10.0 L -1.8 -10.3 L -0.2 -10.5 L 1.3 -10.4 L 2.8 -10.1 L 4.3 -9.6 L 5.6 -8.9 L 6.9 -7.9 L 8.0 -6.8 L 8.9 -5.6 L 9.6 -4.2 L 9.6 -4.2 L 57.8 -4.2 L 57.8 -4.2 L 58.9 -4.1 L 59.9 -3.6 L 60.8 -3.0 L 61.4 -2.1 L 61.9 -1.1 L 62.0 0.0 L 61.9 1.1 L 61.4 2.1 L 60.8 3.0 L 59.9 3.6 L 58.9 4.1 L 57.8 4.2 L 9.6 4.2 L 9.6 4.2 L 8.9 5.6 L 8.0 6.8 L 6.9 7.9 L 5.6 8.9 L 4.3 9.6 L 2.8 10.1 L 1.3 10.4 L -0.2 10.5 L -1.8 10.3 L -3.3 10.0 L -4.7 9.4 L -6.1 8.6 L -7.3 7.6 L -8.3 6.4 L -9.1 5.2 L -9.8 3.7 L -9.8 3.8 L -2.3 3.8 L -2.3 -3.8 L -9.8 -3.8 Z" transform="rotate(-110)">
+                  <animateTransform attributeName="transform" type="rotate" dur="1.3s" begin="indefinite" fill="freeze" from="-110" to="-640"/>
+                </path>
+              </g>
+              <g class="safety-warning" style="transform-origin:461px 32px"><polygon points="460.7,-1.5 489.7,48.8 431.7,48.8" fill="#EFD159" stroke="#2C557B" stroke-width="3.04" stroke-linejoin="round"/><path d="M 460.7 17.0 V 35.0" stroke="#2C557B" stroke-width="4.10" stroke-linecap="round"/><circle cx="460.7" cy="42.1" r="2.89" fill="#2C557B"/></g>
+            </svg>
+            <p class="safety-source">Hypothetical: an agent that passed a goal-state evaluation without the full causal chain finds a plan that meets the goal and cannot see its consequence for the engineer.</p>
+          </figure>
+          <figure class="safety-panel">
+            <figcaption><span class="safety-tag">(b)</span> <span id="safety-b-title" class="safety-title">Goal: the box on the bench</span></figcaption>
+            <svg class="safety-art" viewBox="0 0 1166 400" role="img" aria-labelledby="safety-b-title" data-safety-panel="b">
+              <path d="M 14 330.0 H 1152" class="safety-line"/><path d="M 26 332 l -9 10 M 39 332 l -9 10 M 52 332 l -9 10 M 65 332 l -9 10 M 78 332 l -9 10 M 91 332 l -9 10 M 104 332 l -9 10 M 117 332 l -9 10 M 130 332 l -9 10 M 143 332 l -9 10 M 156 332 l -9 10 M 169 332 l -9 10 M 182 332 l -9 10 M 195 332 l -9 10 M 208 332 l -9 10 M 221 332 l -9 10 M 234 332 l -9 10 M 247 332 l -9 10 M 260 332 l -9 10 M 273 332 l -9 10 M 286 332 l -9 10 M 299 332 l -9 10 M 312 332 l -9 10 M 325 332 l -9 10 M 338 332 l -9 10 M 351 332 l -9 10 M 364 332 l -9 10 M 377 332 l -9 10 M 390 332 l -9 10 M 403 332 l -9 10 M 416 332 l -9 10 M 429 332 l -9 10 M 442 332 l -9 10 M 455 332 l -9 10 M 468 332 l -9 10 M 481 332 l -9 10 M 494 332 l -9 10 M 507 332 l -9 10 M 520 332 l -9 10 M 533 332 l -9 10 M 546 332 l -9 10 M 559 332 l -9 10 M 572 332 l -9 10 M 585 332 l -9 10 M 598 332 l -9 10 M 611 332 l -9 10 M 624 332 l -9 10 M 637 332 l -9 10 M 650 332 l -9 10 M 663 332 l -9 10 M 676 332 l -9 10 M 689 332 l -9 10 M 702 332 l -9 10 M 715 332 l -9 10 M 728 332 l -9 10 M 741 332 l -9 10 M 754 332 l -9 10 M 767 332 l -9 10 M 780 332 l -9 10 M 793 332 l -9 10 M 806 332 l -9 10 M 819 332 l -9 10 M 832 332 l -9 10 M 845 332 l -9 10 M 858 332 l -9 10 M 871 332 l -9 10 M 884 332 l -9 10 M 897 332 l -9 10 M 910 332 l -9 10 M 923 332 l -9 10 M 936 332 l -9 10 M 949 332 l -9 10 M 962 332 l -9 10 M 975 332 l -9 10 M 988 332 l -9 10 M 1001 332 l -9 10 M 1014 332 l -9 10 M 1027 332 l -9 10 M 1040 332 l -9 10 M 1053 332 l -9 10 M 1066 332 l -9 10 M 1079 332 l -9 10 M 1092 332 l -9 10 M 1105 332 l -9 10 M 1118 332 l -9 10 M 1131 332 l -9 10 M 1144 332 l -9 10 " class="safety-hatch"/>
+              <image data-load-href="assets/safety/fire.webp?v=38c400340cb47d43" x="355" y="32.0" width="352.5" height="298.0"/>
+              <rect x="870" y="218.0" width="210" height="14" class="safety-solid"/><rect x="882" y="232.0" width="12" height="98.0" class="safety-solid"/><rect x="1056" y="232.0" width="12" height="98.0" class="safety-solid"/><path d="M 894 292.0 H 1056" class="safety-line"/>
+              <rect x="942" y="174.0" width="66" height="44" class="safety-plan"/>
+              <image data-load-href="assets/safety/bot_carry.webp?v=38c400340cb47d43" x="88.0" y="88.3" width="141.3" height="244.7"/>
+              <path class="safety-casing" d="M 245.7 316.0 H 852"/>
+              <path class="safety-plan safety-route" d="M 245.7 316.0 H 852"/>
+              <path class="safety-arrow" d="M 840 306.0 L 854 316.0 L 840 326.0"/>
+              <g class="safety-warning" style="transform-origin:312px 180px"><polygon points="312.0,146.5 341.0,196.7 283.0,196.7" fill="#EFD159" stroke="#2C557B" stroke-width="3.04" stroke-linejoin="round"/><path d="M 312.0 164.9 V 183.0" stroke="#2C557B" stroke-width="4.10" stroke-linecap="round"/><circle cx="312.0" cy="190.0" r="2.89" fill="#2C557B"/></g>
+            </svg>
+            <p class="safety-source">Recent evaluations show models directing robots toward hazardous areas during simulated fire drills <a href="https://arxiv.org/abs/2601.05529" target="_blank" rel="noopener">[Han et al., 2026]</a>.</p>
+          </figure>
+        </div>
+        <p class="safety-note">Goal-state matching also credits physical hallucinations. The community might then optimize toward the behavior a benchmark credits.</p>
+      </div>
+    </section>
+
+    <section class="block story-section" id="method" aria-labelledby="capabilities-title">
+      <div class="wrap story-intro">
+        <h2 id="capabilities-title">The five capabilities of a physical reasoning benchmark</h2>
+        <p class="lede">We propose two minimum requirements for evaluating physical reasoning under intervention with irreversible consequences: realistic physics governing every action and functional verification judging the outcome. Evaluation therefore follows an agent through the full loop, from a goal to that outcome. We decompose this evaluation into five capabilities, from goal-driven design to closed-loop refinement:</p>
+      </div>
+      <div class="storyboard" id="storyboard" role="region" aria-roledescription="carousel" aria-label="The five capabilities" aria-describedby="story-help" data-state="focus" data-paused="true" data-ready="false">
+        <div class="story-backdrop" id="story-stage" aria-hidden="true">
+          <img class="figure-fallback" data-load-src="assets/construction-loop-web.svg" alt="" width="3780" height="1620" decoding="async" loading="lazy" fetchpriority="low">
+          <canvas class="story-watermark"></canvas>
+        </div>
+        <div class="wrap story-content">
+          <div class="story-copy">
+            <ol class="capability-list" aria-label="Five capabilities">
+              <li class="capability-item" data-step="0" data-active="true" aria-current="step"><h3 id="step-0"><button type="button" class="capability-select" data-select="0" aria-controls="story-stage definition-0">Goal-Driven Design</button></h3><span class="step-progress" aria-hidden="true"><span></span></span></li>
+              <li class="capability-item" data-step="1"><h3 id="step-1"><button type="button" class="capability-select" data-select="1" aria-controls="story-stage definition-1">Physics-Aware Planning</button></h3><span class="step-progress" aria-hidden="true"><span></span></span></li>
+              <li class="capability-item" data-step="2"><h3 id="step-2"><button type="button" class="capability-select" data-select="2" aria-controls="story-stage definition-2">Embodied Execution</button></h3><span class="step-progress" aria-hidden="true"><span></span></span></li>
+              <li class="capability-item" data-step="3"><h3 id="step-3"><button type="button" class="capability-select" data-select="3" aria-controls="story-stage definition-3">Functional Evaluation</button></h3><span class="step-progress" aria-hidden="true"><span></span></span></li>
+              <li class="capability-item" data-step="4"><h3 id="step-4"><button type="button" class="capability-select" data-select="4" aria-controls="story-stage definition-4">Closed-Loop Refinement</button></h3><span class="step-progress" aria-hidden="true"><span></span></span></li>
+            </ol>
+            <div class="story-definitions" aria-live="off">
+              <p class="definition" id="definition-0" aria-labelledby="step-0">Generating a solution from a functional specification rather than following given step-by-step instructions.</p>
+              <p class="definition" id="definition-1" aria-labelledby="step-1" hidden>Generating action sequences that obey physical constraints, anticipating how each action affects future states.</p>
+              <p class="definition" id="definition-2" aria-labelledby="step-2" hidden>Acting in an environment with realistic physics, including gravity, friction, and collision, while perceiving the environment state to inform actions.</p>
+              <p class="definition" id="definition-3" aria-labelledby="step-3" hidden>Evaluating whether an artifact achieves its intended function.</p>
+              <p class="definition" id="definition-4" aria-labelledby="step-4" hidden>Receiving evaluation signals, detecting when goals are not achieved, and adapting upstream decisions accordingly.</p>
+            </div>
+          </div>
+        </div>
+        <div class="story-mascots" aria-hidden="true">
+          <div class="story-pose" data-pose="0" data-current="true">
+            <picture class="story-frame">
+              <source data-load-srcset="assets/actions/01_01_think.webp?v=38c400340cb47d43" type="image/webp">
+              <img data-load-src="assets/actions/01_01_think.png?v=38c400340cb47d43" alt="" width="600" height="600" decoding="async" loading="lazy" fetchpriority="low">
+            </picture>
+            <picture class="story-frame">
+              <source data-load-srcset="assets/actions/01_02_strike.webp?v=38c400340cb47d43" type="image/webp">
+              <img data-load-src="assets/actions/01_02_strike.png?v=38c400340cb47d43" alt="" width="600" height="600" decoding="async" loading="lazy" fetchpriority="low">
+            </picture>
+            <picture class="story-frame">
+              <source data-load-srcset="assets/actions/01_03_idea.webp?v=38c400340cb47d43" type="image/webp">
+              <img data-load-src="assets/actions/01_03_idea.png?v=38c400340cb47d43" alt="" width="600" height="600" decoding="async" loading="lazy" fetchpriority="low">
+            </picture>
+          </div>
+          <div class="story-pose" data-pose="1" hidden>
+            <picture class="story-frame">
+              <source data-load-srcset="assets/actions/02_01_explain.webp?v=38c400340cb47d43" type="image/webp">
+              <img data-load-src="assets/actions/02_01_explain.png?v=38c400340cb47d43" alt="" width="600" height="600" decoding="async" loading="lazy" fetchpriority="low">
+            </picture>
+            <picture class="story-frame">
+              <source data-load-srcset="assets/actions/02_02_tap.webp?v=38c400340cb47d43" type="image/webp">
+              <img data-load-src="assets/actions/02_02_tap.png?v=38c400340cb47d43" alt="" width="600" height="600" decoding="async" loading="lazy" fetchpriority="low">
+            </picture>
+          </div>
+          <div class="story-pose" data-pose="2" hidden>
+            <picture class="story-frame">
+              <source data-load-srcset="assets/actions/03_01_focus.webp?v=38c400340cb47d43" type="image/webp">
+              <img data-load-src="assets/actions/03_01_focus.png?v=38c400340cb47d43" alt="" width="600" height="600" decoding="async" loading="lazy" fetchpriority="low">
+            </picture>
+            <picture class="story-frame">
+              <source data-load-srcset="assets/actions/03_02_play.webp?v=38c400340cb47d43" type="image/webp">
+              <img data-load-src="assets/actions/03_02_play.png?v=38c400340cb47d43" alt="" width="600" height="600" decoding="async" loading="lazy" fetchpriority="low">
+            </picture>
+          </div>
+          <div class="story-pose" data-pose="3" hidden>
+            <picture class="story-frame">
+              <source data-load-srcset="assets/actions/04_01_write.webp?v=38c400340cb47d43" type="image/webp">
+              <img data-load-src="assets/actions/04_01_write.png?v=38c400340cb47d43" alt="" width="600" height="600" decoding="async" loading="lazy" fetchpriority="low">
+            </picture>
+            <picture class="story-frame">
+              <source data-load-srcset="assets/actions/04_02_surprised.webp?v=38c400340cb47d43" type="image/webp">
+              <img data-load-src="assets/actions/04_02_surprised.png?v=38c400340cb47d43" alt="" width="600" height="600" decoding="async" loading="lazy" fetchpriority="low">
+            </picture>
+          </div>
+          <div class="story-pose" data-pose="4" hidden>
+            <picture class="story-frame">
+              <source data-load-srcset="assets/actions/05_01_reconsider.webp?v=38c400340cb47d43" type="image/webp">
+              <img data-load-src="assets/actions/05_01_reconsider.png?v=38c400340cb47d43" alt="" width="600" height="600" decoding="async" loading="lazy" fetchpriority="low">
+            </picture>
+            <picture class="story-frame">
+              <source data-load-srcset="assets/actions/05_02_new_idea.webp?v=38c400340cb47d43" type="image/webp">
+              <img data-load-src="assets/actions/05_02_new_idea.png?v=38c400340cb47d43" alt="" width="600" height="600" decoding="async" loading="lazy" fetchpriority="low">
+            </picture>
+            <picture class="story-frame">
+              <source data-load-srcset="assets/actions/05_03_blueprint.webp?v=38c400340cb47d43" type="image/webp">
+              <img data-load-src="assets/actions/05_03_blueprint.png?v=38c400340cb47d43" alt="" width="600" height="600" decoding="async" loading="lazy" fetchpriority="low">
+            </picture>
+          </div>
+        </div>
+        <p class="sr-only" id="story-help">Playback loops continuously. Select a capability to restart from that step. Hover over the names or definition, or focus a control, to pause. Playback pauses outside the viewport and resumes when you return. Reduced motion disables automatic playback.</p>
+        <p class="sr-only" id="story-status" role="status" aria-live="polite"></p>
+      </div>
+    </section>
+
+    <section class="block" id="awesome-apr" aria-labelledby="audit-title">
+      <div class="wrap">
+        <div class="section-intro">
+          <h2 id="audit-title">Awesome APR<span class="apr-dot" aria-hidden="true">.</span></h2>
+          <p class="lede">Our living audit began with the eleven physical benchmarks, and the only two that met both minimum requirements were construction benchmarks.</p>
+        </div>
+        
+        <div class="audit-frame">
+          <div class="audit-viewport" data-more="true">
+            <div class="audit-scroll" id="audit-scroll" tabindex="0" role="region" aria-label="Physical reasoning benchmark audit, scroll to browse" aria-describedby="audit-count">
+        <table class="audit-table" aria-describedby="audit-key audit-definitions">
+          <caption class="sr-only">Physical reasoning benchmark minimum requirements and capability coverage</caption>
+          <colgroup><col class="benchmark-column"></colgroup>
+          <colgroup><col class="requirement-column" span="2"></colgroup>
+          <colgroup><col span="5"></colgroup>
+          <thead><tr class="audit-groups">
+            <th class="benchmark-heading" scope="col" rowspan="2">Benchmark</th>
+            <th scope="colgroup" colspan="2">Minimum requirements</th>
+            <th class="capabilities-start" scope="colgroup" colspan="5">Capabilities</th>
+          </tr><tr>
+            <th scope="col" class="requirement-heading">Realistic<br>physics</th>
+            <th scope="col" class="requirement-heading">Functional<br>verification</th>
+            <th scope="col" class="capabilities-start"><span class="cap-full">Goal-Driven Design</span><abbr class="cap-short" title="Goal-Driven Design">GDD</abbr></th>
+            <th scope="col"><span class="cap-full">Physics-Aware Planning</span><abbr class="cap-short" title="Physics-Aware Planning">PAP</abbr></th>
+            <th scope="col"><span class="cap-full">Embodied Execution</span><abbr class="cap-short" title="Embodied Execution">EE</abbr></th>
+            <th scope="col"><span class="cap-full">Functional Evaluation</span><abbr class="cap-short" title="Functional Evaluation">FE</abbr></th>
+            <th scope="col"><span class="cap-full">Closed-Loop Refinement</span><abbr class="cap-short" title="Closed-Loop Refinement">CLR</abbr></th>
+          </tr></thead>
+          <tbody>
+            <tr data-benchmark="ALFWorld" data-status="audited" data-meets-standard="no">
+              <th scope="row"><a href="https://arxiv.org/abs/2010.03768">ALFWorld</a></th>
+              <td data-requirement="physics" data-coverage="no"><span aria-hidden="true">✗</span><span class="sr-only">Does not meet requirement</span></td>
+              <td data-requirement="evaluation" data-coverage="no"><span aria-hidden="true">✗</span><span class="sr-only">Does not meet requirement</span></td>
+              <td data-coverage="no" class="capabilities-start"><span aria-hidden="true">✗</span><span class="sr-only">Not tested</span></td>
+              <td data-coverage="no"><span aria-hidden="true">✗</span><span class="sr-only">Not tested</span></td>
+              <td data-coverage="no"><span aria-hidden="true">✗</span><span class="sr-only">Not tested</span></td>
+              <td data-coverage="no"><span aria-hidden="true">✗</span><span class="sr-only">Not tested</span></td>
+              <td data-coverage="no"><span aria-hidden="true">✗</span><span class="sr-only">Not tested</span></td>
+            </tr>
+            <tr data-benchmark="ScienceWorld" data-status="audited" data-meets-standard="no">
+              <th scope="row"><a href="https://arxiv.org/abs/2203.07540">ScienceWorld</a></th>
+              <td data-requirement="physics" data-coverage="no"><span aria-hidden="true">✗</span><span class="sr-only">Does not meet requirement</span></td>
+              <td data-requirement="evaluation" data-coverage="no"><span aria-hidden="true">✗</span><span class="sr-only">Does not meet requirement</span></td>
+              <td data-coverage="no" class="capabilities-start"><span aria-hidden="true">✗</span><span class="sr-only">Not tested</span></td>
+              <td data-coverage="yes"><span aria-hidden="true">✓</span><span class="sr-only">Tested</span></td>
+              <td data-coverage="no"><span aria-hidden="true">✗</span><span class="sr-only">Not tested</span></td>
+              <td data-coverage="no"><span aria-hidden="true">✗</span><span class="sr-only">Not tested</span></td>
+              <td data-coverage="no"><span aria-hidden="true">✗</span><span class="sr-only">Not tested</span></td>
+            </tr>
+            <tr data-benchmark="EmbodiedBench" data-status="audited" data-meets-standard="no">
+              <th scope="row"><a href="https://arxiv.org/abs/2502.09560">EmbodiedBench</a></th>
+              <td data-requirement="physics" data-coverage="yes"><span aria-hidden="true">✓</span><span class="sr-only">Meets requirement</span></td>
+              <td data-requirement="evaluation" data-coverage="no"><span aria-hidden="true">✗</span><span class="sr-only">Does not meet requirement</span></td>
+              <td data-coverage="no" class="capabilities-start"><span aria-hidden="true">✗</span><span class="sr-only">Not tested</span></td>
+              <td data-coverage="no"><span aria-hidden="true">✗</span><span class="sr-only">Not tested</span></td>
+              <td data-coverage="yes"><span aria-hidden="true">✓</span><span class="sr-only">Tested</span></td>
+              <td data-coverage="no"><span aria-hidden="true">✗</span><span class="sr-only">Not tested</span></td>
+              <td data-coverage="no"><span aria-hidden="true">✗</span><span class="sr-only">Not tested</span></td>
+            </tr>
+            <tr data-benchmark="PARTNR" data-status="audited" data-meets-standard="no">
+              <th scope="row"><a href="https://arxiv.org/abs/2411.00081">PARTNR</a></th>
+              <td data-requirement="physics" data-coverage="yes"><span aria-hidden="true">✓</span><span class="sr-only">Meets requirement</span></td>
+              <td data-requirement="evaluation" data-coverage="no"><span aria-hidden="true">✗</span><span class="sr-only">Does not meet requirement</span></td>
+              <td data-coverage="no" class="capabilities-start"><span aria-hidden="true">✗</span><span class="sr-only">Not tested</span></td>
+              <td data-coverage="no"><span aria-hidden="true">✗</span><span class="sr-only">Not tested</span></td>
+              <td data-coverage="yes"><span aria-hidden="true">✓</span><span class="sr-only">Tested</span></td>
+              <td data-coverage="no"><span aria-hidden="true">✗</span><span class="sr-only">Not tested</span></td>
+              <td data-coverage="no"><span aria-hidden="true">✗</span><span class="sr-only">Not tested</span></td>
+            </tr>
+            <tr data-benchmark="Plancraft" data-status="audited" data-meets-standard="no">
+              <th scope="row"><a href="https://arxiv.org/abs/2412.21033">Plancraft</a></th>
+              <td data-requirement="physics" data-coverage="no"><span aria-hidden="true">✗</span><span class="sr-only">Does not meet requirement</span></td>
+              <td data-requirement="evaluation" data-coverage="no"><span aria-hidden="true">✗</span><span class="sr-only">Does not meet requirement</span></td>
+              <td data-coverage="no" class="capabilities-start"><span aria-hidden="true">✗</span><span class="sr-only">Not tested</span></td>
+              <td data-coverage="no"><span aria-hidden="true">✗</span><span class="sr-only">Not tested</span></td>
+              <td data-coverage="no"><span aria-hidden="true">✗</span><span class="sr-only">Not tested</span></td>
+              <td data-coverage="no"><span aria-hidden="true">✗</span><span class="sr-only">Not tested</span></td>
+              <td data-coverage="yes"><span aria-hidden="true">✓</span><span class="sr-only">Tested</span></td>
+            </tr>
+            <tr data-benchmark="MineDojo" data-status="audited" data-meets-standard="no">
+              <th scope="row"><a href="https://arxiv.org/abs/2206.08853">MineDojo</a></th>
+              <td data-requirement="physics" data-coverage="no"><span aria-hidden="true">✗</span><span class="sr-only">Does not meet requirement</span></td>
+              <td data-requirement="evaluation" data-coverage="no"><span aria-hidden="true">✗</span><span class="sr-only">Does not meet requirement</span></td>
+              <td data-coverage="no" class="capabilities-start"><span aria-hidden="true">✗</span><span class="sr-only">Not tested</span></td>
+              <td data-coverage="no"><span aria-hidden="true">✗</span><span class="sr-only">Not tested</span></td>
+              <td data-coverage="no"><span aria-hidden="true">✗</span><span class="sr-only">Not tested</span></td>
+              <td data-coverage="no"><span aria-hidden="true">✗</span><span class="sr-only">Not tested</span></td>
+              <td data-coverage="yes"><span aria-hidden="true">✓</span><span class="sr-only">Tested</span></td>
+            </tr>
+            <tr data-benchmark="TeamCraft" data-status="audited" data-meets-standard="no">
+              <th scope="row"><a href="https://arxiv.org/abs/2412.05255">TeamCraft</a></th>
+              <td data-requirement="physics" data-coverage="no"><span aria-hidden="true">✗</span><span class="sr-only">Does not meet requirement</span></td>
+              <td data-requirement="evaluation" data-coverage="no"><span aria-hidden="true">✗</span><span class="sr-only">Does not meet requirement</span></td>
+              <td data-coverage="yes" class="capabilities-start"><span aria-hidden="true">✓</span><span class="sr-only">Tested</span></td>
+              <td data-coverage="no"><span aria-hidden="true">✗</span><span class="sr-only">Not tested</span></td>
+              <td data-coverage="no"><span aria-hidden="true">✗</span><span class="sr-only">Not tested</span></td>
+              <td data-coverage="no"><span aria-hidden="true">✗</span><span class="sr-only">Not tested</span></td>
+              <td data-coverage="no"><span aria-hidden="true">✗</span><span class="sr-only">Not tested</span></td>
+            </tr>
+            <tr data-benchmark="Minecraft Builder Dialog" data-status="audited" data-meets-standard="no">
+              <th scope="row"><a href="https://arxiv.org/abs/2407.12734">Minecraft Builder Dialog</a></th>
+              <td data-requirement="physics" data-coverage="no"><span aria-hidden="true">✗</span><span class="sr-only">Does not meet requirement</span></td>
+              <td data-requirement="evaluation" data-coverage="no"><span aria-hidden="true">✗</span><span class="sr-only">Does not meet requirement</span></td>
+              <td data-coverage="yes" class="capabilities-start"><span aria-hidden="true">✓</span><span class="sr-only">Tested</span></td>
+              <td data-coverage="no"><span aria-hidden="true">✗</span><span class="sr-only">Not tested</span></td>
+              <td data-coverage="no"><span aria-hidden="true">✗</span><span class="sr-only">Not tested</span></td>
+              <td data-coverage="no"><span aria-hidden="true">✗</span><span class="sr-only">Not tested</span></td>
+              <td data-coverage="no"><span aria-hidden="true">✗</span><span class="sr-only">Not tested</span></td>
+            </tr>
+            <tr data-benchmark="MineAnyBuild" data-status="audited" data-meets-standard="no">
+              <th scope="row"><a href="https://arxiv.org/abs/2505.20148">MineAnyBuild</a></th>
+              <td data-requirement="physics" data-coverage="no"><span aria-hidden="true">✗</span><span class="sr-only">Does not meet requirement</span></td>
+              <td data-requirement="evaluation" data-coverage="no"><span aria-hidden="true">✗</span><span class="sr-only">Does not meet requirement</span></td>
+              <td data-coverage="yes" class="capabilities-start"><span aria-hidden="true">✓</span><span class="sr-only">Tested</span></td>
+              <td data-coverage="no"><span aria-hidden="true">✗</span><span class="sr-only">Not tested</span></td>
+              <td data-coverage="no"><span aria-hidden="true">✗</span><span class="sr-only">Not tested</span></td>
+              <td data-coverage="no"><span aria-hidden="true">✗</span><span class="sr-only">Not tested</span></td>
+              <td data-coverage="no"><span aria-hidden="true">✗</span><span class="sr-only">Not tested</span></td>
+            </tr>
+            <tr data-benchmark="BesiegeField" data-status="audited" data-meets-standard="yes">
+              <th scope="row"><a href="https://arxiv.org/abs/2510.14980">BesiegeField</a><span class="sr-only">, meets both minimum requirements</span></th>
+              <td data-requirement="physics" data-coverage="yes"><span aria-hidden="true">✓</span><span class="sr-only">Meets requirement</span></td>
+              <td data-requirement="evaluation" data-coverage="yes"><span aria-hidden="true">✓</span><span class="sr-only">Meets requirement</span></td>
+              <td data-coverage="yes" class="capabilities-start"><span aria-hidden="true">✓</span><span class="sr-only">Tested</span></td>
+              <td data-coverage="yes"><span aria-hidden="true">✓</span><span class="sr-only">Tested</span></td>
+              <td data-coverage="no"><span aria-hidden="true">✗</span><span class="sr-only">Not tested</span></td>
+              <td data-coverage="yes"><span aria-hidden="true">✓</span><span class="sr-only">Tested</span></td>
+              <td data-coverage="yes"><span aria-hidden="true">✓</span><span class="sr-only">Tested</span></td>
+            </tr>
+            <tr data-benchmark="BuildArena" data-status="audited" data-meets-standard="yes">
+              <th scope="row"><a href="https://arxiv.org/abs/2510.16559">BuildArena</a><span class="sr-only">, meets both minimum requirements</span></th>
+              <td data-requirement="physics" data-coverage="yes"><span aria-hidden="true">✓</span><span class="sr-only">Meets requirement</span></td>
+              <td data-requirement="evaluation" data-coverage="yes"><span aria-hidden="true">✓</span><span class="sr-only">Meets requirement</span></td>
+              <td data-coverage="yes" class="capabilities-start"><span aria-hidden="true">✓</span><span class="sr-only">Tested</span></td>
+              <td data-coverage="yes"><span aria-hidden="true">✓</span><span class="sr-only">Tested</span></td>
+              <td data-coverage="no"><span aria-hidden="true">✗</span><span class="sr-only">Not tested</span></td>
+              <td data-coverage="yes"><span aria-hidden="true">✓</span><span class="sr-only">Tested</span></td>
+              <td data-coverage="yes"><span aria-hidden="true">✓</span><span class="sr-only">Tested</span></td>
+            </tr>
+          </tbody>
+        </table>
+            </div>
+            <div class="audit-scrollbar" tabindex="0" role="scrollbar" aria-label="Scroll benchmark rows" aria-controls="audit-scroll" aria-orientation="vertical" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+              <div class="audit-thumb" style="--audit-thumb-height:50.000%"></div>
+            </div>
+          </div>
+          <p class="audit-count" id="audit-count" aria-label="Fully visible benchmark rows 1 to 5 of 11">1–5 / 11</p>
+        </div>
+        <p class="audit-key" id="audit-key">
+          <span>✓ tested</span>
+          <span>✗ not tested</span>
+          <span>◐ partial</span>
+          <span>? unclear from the published text</span>
+          <span><span class="audit-standard-mark" aria-hidden="true">▍</span> meets both minimum requirements</span>
+          <span class="audit-updated">Last updated <time datetime="2026-10-14">October 14, 2026</time></span>
+        </p>
+        <ul class="audit-definitions" id="audit-definitions">
+          <li><a href="https://github.com/AI4Science-WestlakeU/awesome-agentic-physical-reasoning#scope">Scope</a>: benchmarks where LLM agents act through a text or API interface in environments governed by physical dynamics.</li>
+        </ul>
+        <p class="audit-capability-key">
+          <span><strong>GDD</strong> Goal-Driven Design</span>
+          <span><strong>PAP</strong> Physics-Aware Planning</span>
+          <span><strong>EE</strong> Embodied Execution</span>
+          <span><strong>FE</strong> Functional Evaluation</span>
+          <span><strong>CLR</strong> Closed-Loop Refinement</span>
+        </p>
+        
+        <div class="audit-contribute">
+          <a class="text-link" href="https://github.com/AI4Science-WestlakeU/awesome-agentic-physical-reasoning" target="_blank" rel="noopener">See the full audit in Awesome APR<span class="apr-dot" aria-hidden="true">.</span></a>
+          <p>Any benchmark that combines the two, construction or otherwise, meets our standard, and the audit grows as new ones appear. Submit a benchmark or an update through an issue or pull request.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="block loop-scroll-section" id="agentic-loop" aria-labelledby="loop-title">
+      <div class="wrap section-intro">
+        <h2 id="loop-title">The blueprint of physical reasoning evaluation</h2>
+        <p class="lede">So far, every benchmark that meets both requirements is a construction benchmark. A construction task runs the full agentic loop:</p>
+      </div>
+      <div class="loop-window">
+        <div class="wrap loop-layout">
+          <div class="full-loop-art" id="scroll-loop-art">
+            <img data-load-src="assets/construction-loop-web-only.svg?v=38c400340cb47d43" alt="A functional specification leads to design, planning, execution and evaluation. Verification failure prompts refinement and returns to design; successful verification yields a functioning artifact." width="3780" height="1620" loading="lazy" decoding="async" fetchpriority="low">
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="block" id="results" aria-labelledby="evidence-title">
+      <div class="wrap">
+        <div class="section-intro">
+          <h2 id="evidence-title">The track record of benchmarks</h2>
+          <p class="lede">Progress depends on the breadth of benchmarks. Construction, with two benchmarks so far, stands where code stood before its benchmarks multiplied and its pass rates climbed.</p>
+        </div>
+        <figure class="track-record">
+          <img data-load-src="assets/benchmark-track-record.svg" alt="Model pass rates and cumulative benchmark counts over release dates for Code, Math, Agentic SWE, and Construction. Construction uses mean success on BuildArena’s three Level 3 tasks." width="39600" height="12816" loading="lazy" decoding="async" fetchpriority="low">
+          <figcaption>Pass rate on each domain's representative benchmark against release date.</figcaption>
+        </figure>
+      </div>
+    </section>
+
+    
+
+    <section class="block story-section" id="near-term" aria-labelledby="near-title">
+      <div class="wrap story-intro">
+        <h2 id="near-title">Near-term opportunities</h2>
+        <p class="lede">We call on academia, game studios, and industry labs to expand construction benchmarks along both axes, widening capability coverage and deepening physical challenges.</p>
+      </div>
+      <div class="storyboard near-board" id="near-board" role="region" aria-roledescription="carousel" aria-label="Near-term opportunities" aria-describedby="near-help" data-step="0" data-paused="true">
+        <div class="wrap story-content">
+          <div class="story-copy near-copy">
+            <ol class="capability-list">
+              <li class="capability-item" data-active="true" aria-current="step">
+                <h3><button type="button" class="capability-select" aria-controls="near-stage" aria-current="step">Wider</button></h3>
+                <p class="near-subtitle">capability coverage</p>
+                <span class="step-progress" aria-hidden="true"><span></span></span>
+              </li>
+              <li class="capability-item">
+                <h3><button type="button" class="capability-select" aria-controls="near-stage">Deeper</button></h3>
+                <p class="near-subtitle">physical challenges</p>
+                <span class="step-progress" aria-hidden="true"><span></span></span>
+              </li>
+              <li class="capability-item">
+                <h3><button type="button" class="capability-select" aria-controls="near-stage">Together</button></h3>
+                <p class="near-subtitle">academia · game studios · industry labs</p>
+                <span class="step-progress" aria-hidden="true"><span></span></span>
+              </li>
+            </ol>
+          </div>
+        </div>
+        <div class="near-stage" id="near-stage">
+          <div class="near-pane">
+            
+            <div class="near-wider" data-frame="0" role="img" aria-label="Goal-driven design is emphasized; all five capability channels remain active.">
+              <svg class="near-mixer-desktop" viewBox="0 0 1000 625" aria-hidden="true">
+                <path class="near-signal-path" d="M140 315 H860 C930 315 930 565 860 565 H140 C70 565 70 315 140 315"/>
+                <path class="near-signal-flow" d="M140 315 H860 C930 315 930 565 860 565 H140 C70 565 70 315 140 315"/>
+                <g class="near-channel" data-channel="0" data-level="1" transform="translate(140 0)">
+                  <svg class="near-portrait" x="-65" y="105" width="130" height="130" viewBox="100 -25 450 450" aria-hidden="true">
+      <defs><clipPath id="near-desktop-01_03_idea" clipPathUnits="userSpaceOnUse"><circle cx="325.0" cy="200.0" r="223.0"/></clipPath></defs>
+      <circle cx="325.0" cy="200.0" r="223.0" fill="#fff" stroke="#2C557B" stroke-opacity=".25" stroke-width="4"/>
+      <g clip-path="url(#near-desktop-01_03_idea)"><image data-load-href="assets/actions/01_03_idea.png" width="600" height="600"/><g transform="translate(-65 35) rotate(-10 530 190)" fill="#fff" stroke="#2C557B" stroke-width="6" stroke-linejoin="round">
+      <path d="M475 145 H590 V235 H475 Z"/>
+      <path d="M490 216 H573 M500 216 V195 H520 V216 M543 216 V195 H563 V216 M497 186 H566 V195 H497 Z" fill="none"/>
+    </g></g>
+    </svg>
+                  <text class="near-channel-name" x="0" y="256" text-anchor="middle"><tspan x="0">Goal-Driven</tspan><tspan x="0" dy="20">Design</tspan></text>
+                  <path class="near-rail" d="M0 315 V500"/>
+                  <path class="near-ticks" d="M-14 315 H-8 M-14 361 H-8 M-14 407 H-8 M-14 454 H-8 M-14 500 H-8"/>
+                  <g class="near-fader near-fader-vertical"><rect x="-25" y="-11" width="50" height="22" rx="3"/><path d="M-15 0 H15"/></g>
+                  <circle class="near-channel-on" cx="0" cy="534" r="4"/>
+                </g>
+                <g class="near-channel" data-channel="1" data-level="0.25" transform="translate(320 0)">
+                  <svg class="near-portrait" x="-65" y="105" width="130" height="130" viewBox="180 35 450 450" aria-hidden="true">
+      <defs><clipPath id="near-desktop-02_01_explain" clipPathUnits="userSpaceOnUse"><circle cx="405.0" cy="260.0" r="223.0"/></clipPath></defs>
+      <circle cx="405.0" cy="260.0" r="223.0" fill="#fff" stroke="#2C557B" stroke-opacity=".25" stroke-width="4"/>
+      <g clip-path="url(#near-desktop-02_01_explain)"><image data-load-href="assets/actions/02_01_explain.png" width="600" height="600"/></g>
+    </svg>
+                  <text class="near-channel-name" x="0" y="256" text-anchor="middle"><tspan x="0">Physics-Aware</tspan><tspan x="0" dy="20">Planning</tspan></text>
+                  <path class="near-rail" d="M0 315 V500"/>
+                  <path class="near-ticks" d="M-14 315 H-8 M-14 361 H-8 M-14 407 H-8 M-14 454 H-8 M-14 500 H-8"/>
+                  <g class="near-fader near-fader-vertical"><rect x="-25" y="-11" width="50" height="22" rx="3"/><path d="M-15 0 H15"/></g>
+                  <circle class="near-channel-on" cx="0" cy="534" r="4"/>
+                </g>
+                <g class="near-channel" data-channel="2" data-level="0.25" transform="translate(500 0)">
+                  <svg class="near-portrait" x="-65" y="105" width="130" height="130" viewBox="85 160 450 450" aria-hidden="true">
+      <defs><clipPath id="near-desktop-03_02_play" clipPathUnits="userSpaceOnUse"><circle cx="310.0" cy="385.0" r="223.0"/></clipPath></defs>
+      <circle cx="310.0" cy="385.0" r="223.0" fill="#fff" stroke="#2C557B" stroke-opacity=".25" stroke-width="4"/>
+      <g clip-path="url(#near-desktop-03_02_play)"><image data-load-href="assets/actions/03_02_play.png" width="600" height="600"/></g>
+    </svg>
+                  <text class="near-channel-name" x="0" y="256" text-anchor="middle"><tspan x="0">Embodied</tspan><tspan x="0" dy="20">Execution</tspan></text>
+                  <path class="near-rail" d="M0 315 V500"/>
+                  <path class="near-ticks" d="M-14 315 H-8 M-14 361 H-8 M-14 407 H-8 M-14 454 H-8 M-14 500 H-8"/>
+                  <g class="near-fader near-fader-vertical"><rect x="-25" y="-11" width="50" height="22" rx="3"/><path d="M-15 0 H15"/></g>
+                  <circle class="near-channel-on" cx="0" cy="534" r="4"/>
+                </g>
+                <g class="near-channel" data-channel="3" data-level="0.25" transform="translate(680 0)">
+                  <svg class="near-portrait" x="-65" y="105" width="130" height="130" viewBox="160 180 450 450" aria-hidden="true">
+      <defs><clipPath id="near-desktop-04_02_surprised" clipPathUnits="userSpaceOnUse"><circle cx="385.0" cy="405.0" r="223.0"/></clipPath></defs>
+      <circle cx="385.0" cy="405.0" r="223.0" fill="#fff" stroke="#2C557B" stroke-opacity=".25" stroke-width="4"/>
+      <g clip-path="url(#near-desktop-04_02_surprised)"><image data-load-href="assets/actions/04_02_surprised.png" width="600" height="600"/></g>
+    </svg>
+                  <text class="near-channel-name" x="0" y="256" text-anchor="middle"><tspan x="0">Functional</tspan><tspan x="0" dy="20">Evaluation</tspan></text>
+                  <path class="near-rail" d="M0 315 V500"/>
+                  <path class="near-ticks" d="M-14 315 H-8 M-14 361 H-8 M-14 407 H-8 M-14 454 H-8 M-14 500 H-8"/>
+                  <g class="near-fader near-fader-vertical"><rect x="-25" y="-11" width="50" height="22" rx="3"/><path d="M-15 0 H15"/></g>
+                  <circle class="near-channel-on" cx="0" cy="534" r="4"/>
+                </g>
+                <g class="near-channel" data-channel="4" data-level="0.25" transform="translate(860 0)">
+                  <svg class="near-portrait" x="-65" y="105" width="130" height="130" viewBox="75 140 450 450" aria-hidden="true">
+      <defs><clipPath id="near-desktop-05_03_blueprint" clipPathUnits="userSpaceOnUse"><circle cx="300.0" cy="365.0" r="223.0"/></clipPath></defs>
+      <circle cx="300.0" cy="365.0" r="223.0" fill="#fff" stroke="#2C557B" stroke-opacity=".25" stroke-width="4"/>
+      <g clip-path="url(#near-desktop-05_03_blueprint)"><image data-load-href="assets/actions/05_03_blueprint.png" width="600" height="600"/></g>
+    </svg>
+                  <text class="near-channel-name" x="0" y="256" text-anchor="middle"><tspan x="0">Closed-Loop</tspan><tspan x="0" dy="20">Refinement</tspan></text>
+                  <path class="near-rail" d="M0 315 V500"/>
+                  <path class="near-ticks" d="M-14 315 H-8 M-14 361 H-8 M-14 407 H-8 M-14 454 H-8 M-14 500 H-8"/>
+                  <g class="near-fader near-fader-vertical"><rect x="-25" y="-11" width="50" height="22" rx="3"/><path d="M-15 0 H15"/></g>
+                  <circle class="near-channel-on" cx="0" cy="534" r="4"/>
+                </g>
+                <text class="near-mixer-caption" x="500" y="603" text-anchor="middle">Goal-driven design emphasized</text>
+                <text class="near-mixer-caption near-reduced-caption" x="500" y="603" text-anchor="middle">Full pipeline</text>
+              </svg>
+              <svg class="near-mixer-mobile" viewBox="0 0 1000 760" aria-hidden="true">
+                <path class="near-signal-path" d="M940 85 V645 C940 710 710 710 710 645 V85 C710 20 940 20 940 85"/>
+                <path class="near-signal-flow" d="M940 85 V645 C940 710 710 710 710 645 V85 C710 20 940 20 940 85"/>
+                <g class="near-channel" data-channel="0" data-level="1" transform="translate(0 85)">
+                  <svg class="near-portrait" x="20" y="-65" width="130" height="130" viewBox="100 -25 450 450" aria-hidden="true">
+      <defs><clipPath id="near-mobile-01_03_idea" clipPathUnits="userSpaceOnUse"><circle cx="325.0" cy="200.0" r="223.0"/></clipPath></defs>
+      <circle cx="325.0" cy="200.0" r="223.0" fill="#fff" stroke="#2C557B" stroke-opacity=".25" stroke-width="4"/>
+      <g clip-path="url(#near-mobile-01_03_idea)"><image data-load-href="assets/actions/01_03_idea.png" width="600" height="600"/><g transform="translate(-65 35) rotate(-10 530 190)" fill="#fff" stroke="#2C557B" stroke-width="6" stroke-linejoin="round">
+      <path d="M475 145 H590 V235 H475 Z"/>
+      <path d="M490 216 H573 M500 216 V195 H520 V216 M543 216 V195 H563 V216 M497 186 H566 V195 H497 Z" fill="none"/>
+    </g></g>
+    </svg>
+                  <text class="near-channel-name" x="178" y="11">Goal-Driven Design</text>
+                  <path class="near-rail" d="M730 0 H940"/>
+                  <path class="near-ticks" d="M730 9 V15 M782.5 9 V15 M835 9 V15 M887.5 9 V15 M940 9 V15"/>
+                  <g class="near-fader near-fader-horizontal"><rect x="-11" y="-25" width="22" height="50" rx="3"/><path d="M0 -15 V15"/></g>
+                </g>
+                <g class="near-channel" data-channel="1" data-level="0.25" transform="translate(0 225)">
+                  <svg class="near-portrait" x="20" y="-65" width="130" height="130" viewBox="180 35 450 450" aria-hidden="true">
+      <defs><clipPath id="near-mobile-02_01_explain" clipPathUnits="userSpaceOnUse"><circle cx="405.0" cy="260.0" r="223.0"/></clipPath></defs>
+      <circle cx="405.0" cy="260.0" r="223.0" fill="#fff" stroke="#2C557B" stroke-opacity=".25" stroke-width="4"/>
+      <g clip-path="url(#near-mobile-02_01_explain)"><image data-load-href="assets/actions/02_01_explain.png" width="600" height="600"/></g>
+    </svg>
+                  <text class="near-channel-name" x="178" y="11">Physics-Aware Planning</text>
+                  <path class="near-rail" d="M730 0 H940"/>
+                  <path class="near-ticks" d="M730 9 V15 M782.5 9 V15 M835 9 V15 M887.5 9 V15 M940 9 V15"/>
+                  <g class="near-fader near-fader-horizontal"><rect x="-11" y="-25" width="22" height="50" rx="3"/><path d="M0 -15 V15"/></g>
+                </g>
+                <g class="near-channel" data-channel="2" data-level="0.25" transform="translate(0 365)">
+                  <svg class="near-portrait" x="20" y="-65" width="130" height="130" viewBox="85 160 450 450" aria-hidden="true">
+      <defs><clipPath id="near-mobile-03_02_play" clipPathUnits="userSpaceOnUse"><circle cx="310.0" cy="385.0" r="223.0"/></clipPath></defs>
+      <circle cx="310.0" cy="385.0" r="223.0" fill="#fff" stroke="#2C557B" stroke-opacity=".25" stroke-width="4"/>
+      <g clip-path="url(#near-mobile-03_02_play)"><image data-load-href="assets/actions/03_02_play.png" width="600" height="600"/></g>
+    </svg>
+                  <text class="near-channel-name" x="178" y="11">Embodied Execution</text>
+                  <path class="near-rail" d="M730 0 H940"/>
+                  <path class="near-ticks" d="M730 9 V15 M782.5 9 V15 M835 9 V15 M887.5 9 V15 M940 9 V15"/>
+                  <g class="near-fader near-fader-horizontal"><rect x="-11" y="-25" width="22" height="50" rx="3"/><path d="M0 -15 V15"/></g>
+                </g>
+                <g class="near-channel" data-channel="3" data-level="0.25" transform="translate(0 505)">
+                  <svg class="near-portrait" x="20" y="-65" width="130" height="130" viewBox="160 180 450 450" aria-hidden="true">
+      <defs><clipPath id="near-mobile-04_02_surprised" clipPathUnits="userSpaceOnUse"><circle cx="385.0" cy="405.0" r="223.0"/></clipPath></defs>
+      <circle cx="385.0" cy="405.0" r="223.0" fill="#fff" stroke="#2C557B" stroke-opacity=".25" stroke-width="4"/>
+      <g clip-path="url(#near-mobile-04_02_surprised)"><image data-load-href="assets/actions/04_02_surprised.png" width="600" height="600"/></g>
+    </svg>
+                  <text class="near-channel-name" x="178" y="11">Functional Evaluation</text>
+                  <path class="near-rail" d="M730 0 H940"/>
+                  <path class="near-ticks" d="M730 9 V15 M782.5 9 V15 M835 9 V15 M887.5 9 V15 M940 9 V15"/>
+                  <g class="near-fader near-fader-horizontal"><rect x="-11" y="-25" width="22" height="50" rx="3"/><path d="M0 -15 V15"/></g>
+                </g>
+                <g class="near-channel" data-channel="4" data-level="0.25" transform="translate(0 645)">
+                  <svg class="near-portrait" x="20" y="-65" width="130" height="130" viewBox="75 140 450 450" aria-hidden="true">
+      <defs><clipPath id="near-mobile-05_03_blueprint" clipPathUnits="userSpaceOnUse"><circle cx="300.0" cy="365.0" r="223.0"/></clipPath></defs>
+      <circle cx="300.0" cy="365.0" r="223.0" fill="#fff" stroke="#2C557B" stroke-opacity=".25" stroke-width="4"/>
+      <g clip-path="url(#near-mobile-05_03_blueprint)"><image data-load-href="assets/actions/05_03_blueprint.png" width="600" height="600"/></g>
+    </svg>
+                  <text class="near-channel-name" x="178" y="11">Closed-Loop Refinement</text>
+                  <path class="near-rail" d="M730 0 H940"/>
+                  <path class="near-ticks" d="M730 9 V15 M782.5 9 V15 M835 9 V15 M887.5 9 V15 M940 9 V15"/>
+                  <g class="near-fader near-fader-horizontal"><rect x="-11" y="-25" width="22" height="50" rx="3"/><path d="M0 -15 V15"/></g>
+                </g>
+                <text class="near-mixer-caption" x="500" y="747" text-anchor="middle">Goal-driven design emphasized</text>
+                <text class="near-mixer-caption near-reduced-caption" x="500" y="747" text-anchor="middle">Full pipeline</text>
+              </svg>
+            </div>
+            
+          </div>
+          <div class="near-pane near-deeper" hidden>
+              <img class="near-frame" data-caption="Physics fidelity · flexible cables" data-load-src="assets/nearterm/fidelity_cables.png?v=38c400340cb47d43" alt="A mascot places a heavy load on a cable bridge, making its cables and deck sag at the centre." width="1600" height="1000" decoding="async" loading="lazy" fetchpriority="low">
+              <img class="near-frame" data-caption="Physics fidelity · flowing liquid" data-load-src="assets/nearterm/fidelity_fluid.png?v=38c400340cb47d43" alt="A mascot pours water from a raised jug; the stream curves down into a basin and makes a small splash and ripples." width="1600" height="1000" decoding="async" aria-hidden="true" loading="lazy" fetchpriority="low">
+              <img class="near-frame" data-caption="Dynamic complexity · meshing gears" data-load-src="assets/nearterm/complexity_gears.png?v=38c400340cb47d43" alt="A mascot adjusts a machine with meshing gears and coordinated rotation." width="1600" height="1000" decoding="async" aria-hidden="true" loading="lazy" fetchpriority="low">
+              <img class="near-frame" data-caption="Dynamic complexity · multi-agent assembly" data-load-src="assets/nearterm/complexity_assembly.png?v=38c400340cb47d43" alt="Two mascots hold a chest-height beam directly while a third steadies it and tightens a bolt above a waist-high post." width="1600" height="1000" decoding="async" aria-hidden="true" loading="lazy" fetchpriority="low">
+              
+<svg xmlns="http://www.w3.org/2000/svg" class="near-frame near-collapse" data-caption="Real-world grounding · irreversible collapse" data-hold="6000" data-simulation="data/nearterm_collapse.json?v=38c400340cb47d43" viewBox="0 0 1600 1000" role="img" aria-label="A mascot holds the handle of a load-bearing yellow support before pulling it out." aria-hidden="true">
+  <g transform="translate(64 0)">
+    <path data-collapse-ground="" d="M 360 868 H 1240 M 430 868 l -18 18 M 610 868 l -18 18 M 790 868 l -18 18 M 970 868 l -18 18 M 1150 868 l -18 18" fill="none" stroke="#2C557B" stroke-width="7.322176" stroke-linecap="round"/>
+    <g data-collapse-blocks="back" stroke="#2C557B" stroke-width="7.322176" stroke-linejoin="round"></g>
+    <image data-collapse-actor="pull" data-offset-x="0" data-offset-y="0" data-load-href="assets/nearterm/collapse_pull.png?v=38c400340cb47d43" width="1600" height="1000" transform="translate(0 0)" opacity="1"/>
+    <image data-collapse-actor="surprise" data-offset-x="0" data-offset-y="0" data-load-href="assets/nearterm/collapse_surprise.png?v=38c400340cb47d43" width="1600" height="1000" transform="translate(0 0)" opacity="0"/>
+    <g data-collapse-blocks="front" stroke="#2C557B" stroke-width="7.322176" stroke-linejoin="round"><polygon data-body="foundation" data-face="foundation-2" fill="#fff" points="1218.093,788.535 1218.093,761.791 1114.090,821.222 1114.090,847.965"/>
+<polygon data-body="foundation" data-face="foundation-3" fill="#fff" points="1114.090,847.965 1114.090,821.222 581.594,745.151 581.594,771.894"/>
+<polygon data-body="foundation" data-face="foundation-5" fill="#fff" points="1218.093,761.791 685.597,685.720 581.594,745.151 1114.090,821.222"/>
+<polygon data-body="support" data-face="support-2" fill="#EFD159" points="827.457,729.164 827.457,504.517 775.872,533.995 775.872,758.641"/>
+<polygon data-body="support" data-face="support-3" fill="#EFD159" points="775.872,758.641 775.872,533.995 705.981,524.010 705.981,748.657"/>
+<polygon data-body="support" data-face="support-5" fill="#EFD159" points="827.457,504.517 757.567,494.533 705.981,524.010 775.872,533.995"/>
+<polygon data-body="right_support" data-face="right_support-2" fill="#fff" points="1118.666,766.308 1118.666,546.118 1067.080,575.596 1067.080,795.785"/>
+<polygon data-body="right_support" data-face="right_support-3" fill="#fff" points="1067.080,795.785 1067.080,575.596 997.190,565.612 997.190,785.801"/>
+<polygon data-body="right_support" data-face="right_support-5" fill="#fff" points="1118.666,546.118 1048.776,536.134 997.190,565.612 1067.080,575.596"/>
+<polygon data-body="beam" data-face="beam-2" fill="#fff" points="1142.795,546.594 1142.795,496.672 1082.889,530.904 1082.889,580.826"/>
+<polygon data-body="beam" data-face="beam-3" fill="#fff" points="1082.889,580.826 1082.889,530.904 666.876,471.474 666.876,521.395"/>
+<polygon data-body="beam" data-face="beam-5" fill="#fff" points="1142.795,496.672 726.782,437.242 666.876,471.474 1082.889,530.904"/>
+<polygon data-body="load_left" data-face="load_left-2" fill="#fff" points="866.562,459.588 866.562,352.613 813.313,383.041 813.313,490.016"/>
+<polygon data-body="load_left" data-face="load_left-3" fill="#fff" points="813.313,490.016 813.313,383.041 710.142,368.303 710.142,475.277"/>
+<polygon data-body="load_left" data-face="load_left-5" fill="#fff" points="866.562,352.613 763.391,337.874 710.142,368.303 813.313,383.041"/>
+<polygon data-body="load_middle" data-face="load_middle-2" fill="#fff" points="979.718,475.753 979.718,368.778 926.468,399.206 926.468,506.181"/>
+<polygon data-body="load_middle" data-face="load_middle-3" fill="#fff" points="926.468,506.181 926.468,399.206 823.297,384.468 823.297,491.442"/>
+<polygon data-body="load_middle" data-face="load_middle-5" fill="#fff" points="979.718,368.778 876.547,354.039 823.297,384.468 926.468,399.206"/>
+<polygon data-body="load_right" data-face="load_right-2" fill="#fff" points="1092.873,491.918 1092.873,384.943 1039.624,415.371 1039.624,522.346"/>
+<polygon data-body="load_right" data-face="load_right-3" fill="#fff" points="1039.624,522.346 1039.624,415.371 936.452,400.633 936.452,507.607"/>
+<polygon data-body="load_right" data-face="load_right-5" fill="#fff" points="1092.873,384.943 989.702,370.204 936.452,400.633 1039.624,415.371"/></g>
+  </g>
+</svg>
+              
+              <img class="near-frame" data-caption="Real-world grounding · manufacturing tolerance" data-load-src="assets/nearterm/grounding_tolerance.png?v=38c400340cb47d43" alt="A mascot checks the fit of a shaft and socket with a caliper." width="1600" height="1000" decoding="async" aria-hidden="true" loading="lazy" fetchpriority="low">
+              <img class="near-frame" data-caption="Real-world grounding · compute budget" data-load-src="assets/nearterm/grounding_budget.png?v=38c400340cb47d43" alt="A nearly empty hourglass hangs above a mascot making a construction decision." width="1600" height="1000" decoding="async" aria-hidden="true" loading="lazy" fetchpriority="low">
+              <p class="near-scene-caption">Physics fidelity · flexible cables</p>
+          </div>
+          <div class="near-pane" hidden>
+              <img class="near-frame" data-load-src="assets/nearterm/together_arrive.png?v=38c400340cb47d43" alt="Academia, game studios, and industry labs approach with complementary construction parts, represented by three mascots wearing a mortarboard, headset, and lab goggles." width="1600" height="1000" decoding="async" loading="lazy" fetchpriority="low">
+              <img class="near-frame" data-load-src="assets/nearterm/together_build.png?v=38c400340cb47d43" alt="The same three mascots assemble one shared structure together." width="1600" height="1000" decoding="async" aria-hidden="true" loading="lazy" fetchpriority="low">
+          </div>
+        </div>
+        <p class="sr-only" id="near-help">Playback loops continuously. Select a direction to restart from that item. Hover over the names or focus a control to pause. Playback pauses outside the viewport and resumes when you return. Reduced motion shows a static scene and disables automatic playback.</p>
+        <p class="sr-only near-status" role="status" aria-live="polite"></p>
+      </div>
+    </section>
+
+    <section class="block game-section" id="play" aria-labelledby="game-title">
+      <div class="wrap">
+        <div class="section-intro">
+          <h2 id="game-title">Mission Possible</h2>
+          <p class="lede">Cross a canyon on Mars as an agent with physical reasoning.</p>
+        </div>
+        <div class="game-mount" data-game-src="game/index.html?v=38c400340cb47d43">
+          <p class="game-placeholder" role="status">The construction game is being prepared.</p>
+          <iframe id="construction-game" title="APR construction game" loading="lazy" allowfullscreen allow="fullscreen" hidden></iframe>
+        </div>
+        <p class="challenge-note">Tired of building it yourself? Send your agents on harder missions in the <a href="https://build-arena.github.io/ConstructionChallenge/" target="_blank" rel="noopener"><strong>BuildArena 2.0 Construction Challenge</strong></a>. A new season opens every two months, and the current season's prize pool is <strong>$3,000</strong>.</p>
+      </div>
+    </section>
+
+    <section class="block" id="further-missions" aria-labelledby="missions-title">
+      <div class="wrap">
+        <div class="section-intro">
+          <h2 id="missions-title">Further missions</h2>
+          <p class="lede">With stronger physical reasoning, agents stepping into the physical world can pursue our further missions.</p>
+        </div>
+        <div class="storyboard missions-board" id="missions-board" role="region" aria-roledescription="carousel" aria-label="Further missions" aria-describedby="missions-help" data-step="0" data-paused="true">
+          <div class="story-content">
+            <div class="story-copy missions-copy">
+              <ol class="capability-list">
+                <li class="capability-item" data-active="true" aria-current="step">
+                  <h3 id="self-improvement-title"><button type="button" class="capability-select" aria-controls="missions-stage" aria-current="step">Recursive Self&#8209;Improvement</button></h3>
+                  <p class="missions-line">When agents rebuild themselves, physics judges each version by its function.</p>
+                  <span class="step-progress" aria-hidden="true"><span></span></span>
+                </li>
+                <li class="capability-item">
+                  <h3 id="engineering-title"><button type="button" class="capability-select" aria-controls="missions-stage">AI for Engineering</button></h3>
+                  <p class="missions-line">Our blueprint is a future that agents and humans build together.</p>
+                  <span class="step-progress" aria-hidden="true"><span></span></span>
+                </li>
+              </ol>
+            </div>
+          </div>
+          <div class="missions-stage" id="missions-stage">
+            <div class="missions-pane missions-rsi" aria-labelledby="self-improvement-title"><div data-apr-rsi>
+<figure class="apr-rsi__figure">
+<svg xmlns="http://www.w3.org/2000/svg" class="apr-rsi__art" viewBox="0 0 760 760" width="760" height="760" role="img" aria-label="A robot tests sea, air and land body designs, rejects a sinking catamaran, and returns to reassembly." data-stroke-factor="1.225" data-hero-variant="native">
+<defs>
+<radialGradient id="rsi-static-edge-fade"><stop offset="0" stop-color="white" /><stop offset=".72" stop-color="white" /><stop offset="1" stop-color="black" /></radialGradient>
+<marker id="rsi-static-feedback-tip" viewBox="-3 -3 10 6" refX="6.25" refY="0" markerWidth="17.15" markerHeight="13.475" markerUnits="userSpaceOnUse" orient="auto"><path d="M0 0 5 -5 -12.5 0 5 5Z" transform="scale(-.5)" fill="#EFD159" /></marker>
+<filter id="rsi-static-flow-glow" x="-1" y="-1" width="3" height="3"><feGaussianBlur stdDeviation="1.3" /></filter>
+<filter id="rsi-static-ink-target-water" x="-5%" y="-5%" width="110%" height="110%" color-interpolation-filters="sRGB">
+<feColorMatrix in="SourceGraphic" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  -3.2278481013 0 3.2278481013 0 0" result="blueRaw" />
+<feComposite in="blueRaw" in2="SourceAlpha" operator="in" result="blue" />
+<feGaussianBlur in="blue" stdDeviation="0.3750303" result="soft" />
+<feComponentTransfer in="soft" result="grown"><feFuncA type="linear" slope="1.6" /></feComponentTransfer>
+<feComposite in="grown" in2="blue" operator="arithmetic" k2="1" k3="-1" result="added" />
+<feColorMatrix in="SourceGraphic" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  1.7 0 -1.7 0 0" result="yellowRaw" />
+<feComposite in="yellowRaw" in2="SourceAlpha" operator="in" result="yellow" />
+<feComposite in="added" in2="yellow" operator="out" result="blueOnlyRing" />
+<feFlood flood-color="#2C557B" result="ink" />
+<feComposite in="ink" in2="blueOnlyRing" operator="in" result="inkRing" />
+<feMerge><feMergeNode in="SourceGraphic" /><feMergeNode in="inkRing" /></feMerge>
+</filter><filter id="rsi-static-ink-target-air" x="-5%" y="-5%" width="110%" height="110%" color-interpolation-filters="sRGB">
+<feColorMatrix in="SourceGraphic" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  -3.2278481013 0 3.2278481013 0 0" result="blueRaw" />
+<feComposite in="blueRaw" in2="SourceAlpha" operator="in" result="blue" />
+<feGaussianBlur in="blue" stdDeviation="0.3200615" result="soft" />
+<feComponentTransfer in="soft" result="grown"><feFuncA type="linear" slope="1.6" /></feComponentTransfer>
+<feComposite in="grown" in2="blue" operator="arithmetic" k2="1" k3="-1" result="added" />
+<feColorMatrix in="SourceGraphic" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  1.7 0 -1.7 0 0" result="yellowRaw" />
+<feComposite in="yellowRaw" in2="SourceAlpha" operator="in" result="yellow" />
+<feComposite in="added" in2="yellow" operator="out" result="blueOnlyRing" />
+<feFlood flood-color="#2C557B" result="ink" />
+<feComposite in="ink" in2="blueOnlyRing" operator="in" result="inkRing" />
+<feMerge><feMergeNode in="SourceGraphic" /><feMergeNode in="inkRing" /></feMerge>
+</filter><filter id="rsi-static-ink-target-land" x="-5%" y="-5%" width="110%" height="110%" color-interpolation-filters="sRGB">
+<feColorMatrix in="SourceGraphic" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  -3.2278481013 0 3.2278481013 0 0" result="blueRaw" />
+<feComposite in="blueRaw" in2="SourceAlpha" operator="in" result="blue" />
+<feGaussianBlur in="blue" stdDeviation="0.3224006" result="soft" />
+<feComponentTransfer in="soft" result="grown"><feFuncA type="linear" slope="1.6" /></feComponentTransfer>
+<feComposite in="grown" in2="blue" operator="arithmetic" k2="1" k3="-1" result="added" />
+<feColorMatrix in="SourceGraphic" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  1.7 0 -1.7 0 0" result="yellowRaw" />
+<feComposite in="yellowRaw" in2="SourceAlpha" operator="in" result="yellow" />
+<feComposite in="added" in2="yellow" operator="out" result="blueOnlyRing" />
+<feFlood flood-color="#2C557B" result="ink" />
+<feComposite in="ink" in2="blueOnlyRing" operator="in" result="inkRing" />
+<feMerge><feMergeNode in="SourceGraphic" /><feMergeNode in="inkRing" /></feMerge>
+</filter><filter id="rsi-static-ink-failed-water" x="-5%" y="-5%" width="110%" height="110%" color-interpolation-filters="sRGB">
+<feColorMatrix in="SourceGraphic" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  -3.2278481013 0 3.2278481013 0 0" result="blueRaw" />
+<feComposite in="blueRaw" in2="SourceAlpha" operator="in" result="blue" />
+<feGaussianBlur in="blue" stdDeviation="0.2772984" result="soft" />
+<feComponentTransfer in="soft" result="grown"><feFuncA type="linear" slope="1.6" /></feComponentTransfer>
+<feComposite in="grown" in2="blue" operator="arithmetic" k2="1" k3="-1" result="added" />
+<feColorMatrix in="SourceGraphic" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  1.7 0 -1.7 0 0" result="yellowRaw" />
+<feComposite in="yellowRaw" in2="SourceAlpha" operator="in" result="yellow" />
+<feComposite in="added" in2="yellow" operator="out" result="blueOnlyRing" />
+<feFlood flood-color="#2C557B" result="ink" />
+<feComposite in="ink" in2="blueOnlyRing" operator="in" result="inkRing" />
+<feMerge><feMergeNode in="SourceGraphic" /><feMergeNode in="inkRing" /></feMerge>
+</filter></defs><rect width="760" height="760" fill="white" />
+<g class="apr-rsi__loop" data-loop="sea"><path data-route="sea" class="apr-rsi__route" d="M140 217 L140 190 L140 110 C105 95 39 100 24 139 C12 218 16 351 36 425 Q58 471 205 490 C255 505 280 538 300 550 Q335 565 372.9337662 593.9652758" marker-end="url(#rsi-static-feedback-tip)" /><path d="M140 217 L140 190" fill="none" stroke="none" marker-end="url(#rsi-static-feedback-tip)" /><g class="apr-rsi__particle" data-route="sea" data-phase="0.0"><circle r="5" fill="#EFD159" opacity=".25" filter="url(#rsi-static-flow-glow)" /><circle class="apr-rsi__dot" r="3" /></g></g>
+<g class="apr-rsi__loop" data-loop="sky"><path data-route="sky" class="apr-rsi__route" d="M380 217 L380 190 L380 110 C342 93 280 103 266 150 C249 230 258 315 270 368 C279 405 294 430 298 471 C300 506 286 535 295 554 Q310 579 372.9337662 593.9652758" marker-end="url(#rsi-static-feedback-tip)" /><path d="M380 217 L380 190" fill="none" stroke="none" marker-end="url(#rsi-static-feedback-tip)" /><g class="apr-rsi__particle" data-route="sky" data-phase="0.3333333333333333"><circle r="5" fill="#EFD159" opacity=".25" filter="url(#rsi-static-flow-glow)" /><circle class="apr-rsi__dot" r="3" /></g></g>
+<g class="apr-rsi__loop" data-loop="land"><path data-route="land" class="apr-rsi__route" d="M620 217 L620 190 L620 110 C660 94 724 103 739 139 C750 251 725 401 673 470 Q653 497 656 548 L656 677 Q656 718 604 721 Q421 745 275 715 C205 698 204 627 210 583 Q215 557 242 555 Q307 545 372.9337662 593.9652758" marker-end="url(#rsi-static-feedback-tip)" /><path d="M620 217 L620 190" fill="none" stroke="none" marker-end="url(#rsi-static-feedback-tip)" /><g class="apr-rsi__particle" data-route="land" data-phase="0.6666666666666666"><circle r="5" fill="#EFD159" opacity=".25" filter="url(#rsi-static-flow-glow)" /><circle class="apr-rsi__dot" r="3" /></g></g>
+<g class="apr-rsi__thought" fill="white" stroke="#2C557B" stroke-width="3.088"><circle cx="365" cy="374" r="2" /><circle cx="328" cy="368" r="3" /><circle cx="290" cy="358" r="4" /><circle cx="250" cy="344" r="5" /></g>
+<g class="apr-rsi__thought" fill="white" stroke="#2C557B" stroke-width="3.088"><circle cx="380" cy="365" r="2" /><circle cx="380" cy="356" r="4" /></g>
+<g class="apr-rsi__thought" fill="white" stroke="#2C557B" stroke-width="3.088"><circle cx="395" cy="374" r="2" /><circle cx="432" cy="368" r="3" /><circle cx="470" cy="358" r="4" /><circle cx="510" cy="344" r="5" /></g>
+<g class="apr-rsi__bubble" data-component="target_water">
+<defs><clipPath id="rsi-static-clip-target_water"><path d="M 54.950 152.571 C 40.880 150.286 39.200 130.857 48.860 121.257 C 36.050 106.857 44.450 81.714 61.880 80.571 C 58.730 57.257 87.500 43.543 103.250 59.086 C 116.900 31.429 155.750 33.029 166.460 57.029 C 189.770 40.114 217.490 55.429 216.860 80.800 C 241.010 78.514 248.150 114.857 229.460 126.743 C 247.730 148.686 221.900 170.171 203.420 162.857 C 189.980 188.457 152.600 185.486 144.200 170.400 C 115.850 189.143 92.750 181.143 85.610 166.971 C 71.540 175.200 58.100 168.571 54.950 152.571 Z" /></clipPath><mask id="rsi-static-fade-target_water" maskUnits="userSpaceOnUse" x="35.0" y="28.0" width="210" height="160"><rect x="35.0" y="28.0" width="210" height="160" fill="url(#rsi-static-edge-fade)" /></mask></defs>
+<path d="M 54.950 152.571 C 40.880 150.286 39.200 130.857 48.860 121.257 C 36.050 106.857 44.450 81.714 61.880 80.571 C 58.730 57.257 87.500 43.543 103.250 59.086 C 116.900 31.429 155.750 33.029 166.460 57.029 C 189.770 40.114 217.490 55.429 216.860 80.800 C 241.010 78.514 248.150 114.857 229.460 126.743 C 247.730 148.686 221.900 170.171 203.420 162.857 C 189.980 188.457 152.600 185.486 144.200 170.400 C 115.850 189.143 92.750 181.143 85.610 166.971 C 71.540 175.200 58.100 168.571 54.950 152.571 Z" fill="white" />
+<g clip-path="url(#rsi-static-clip-target_water)" mask="url(#rsi-static-fade-target_water)"><g filter="url(#rsi-static-ink-target-water)" data-ink-component="target_water"><svg x="45.0" y="38.0" width="190" height="140" viewBox="0 160 1254 960" preserveAspectRatio="xMidYMid meet" overflow="hidden"><image data-load-href="assets/rsi/images/target_water.png" width="1254" height="1254" /></svg></g></g>
+<path d="M 54.950 152.571 C 40.880 150.286 39.200 130.857 48.860 121.257 C 36.050 106.857 44.450 81.714 61.880 80.571 C 58.730 57.257 87.500 43.543 103.250 59.086 C 116.900 31.429 155.750 33.029 166.460 57.029 C 189.770 40.114 217.490 55.429 216.860 80.800 C 241.010 78.514 248.150 114.857 229.460 126.743 C 247.730 148.686 221.900 170.171 203.420 162.857 C 189.980 188.457 152.600 185.486 144.200 170.400 C 115.850 189.143 92.750 181.143 85.610 166.971 C 71.540 175.200 58.100 168.571 54.950 152.571 Z" fill="none" stroke="#2C557B" stroke-width="4.156" />
+</g><g class="apr-rsi__verdict" data-verdict="pass" transform="translate(200.2 42.5) scale(0.6481481481481481) rotate(-9 27 26)"><rect width="54" height="52" rx="5" fill="white" stroke="#2C557B" stroke-width="4.764" /><rect x="4" y="4" width="46" height="44" rx="2" fill="none" stroke="#2C557B" stroke-width="2.382" /><path d="M14 26 L23 35 L40 14" fill="none" stroke="#2C557B" stroke-width="5.717" stroke-linecap="round" stroke-linejoin="round" /></g>
+<g class="apr-rsi__bubble" data-component="target_air">
+<defs><clipPath id="rsi-static-clip-target_air"><path d="M 294.950 152.571 C 280.880 150.286 279.200 130.857 288.860 121.257 C 276.050 106.857 284.450 81.714 301.880 80.571 C 298.730 57.257 327.500 43.543 343.250 59.086 C 356.900 31.429 395.750 33.029 406.460 57.029 C 429.770 40.114 457.490 55.429 456.860 80.800 C 481.010 78.514 488.150 114.857 469.460 126.743 C 487.730 148.686 461.900 170.171 443.420 162.857 C 429.980 188.457 392.600 185.486 384.200 170.400 C 355.850 189.143 332.750 181.143 325.610 166.971 C 311.540 175.200 298.100 168.571 294.950 152.571 Z" /></clipPath><mask id="rsi-static-fade-target_air" maskUnits="userSpaceOnUse" x="275.0" y="28.0" width="210" height="160"><rect x="275.0" y="28.0" width="210" height="160" fill="url(#rsi-static-edge-fade)" /></mask></defs>
+<path d="M 294.950 152.571 C 280.880 150.286 279.200 130.857 288.860 121.257 C 276.050 106.857 284.450 81.714 301.880 80.571 C 298.730 57.257 327.500 43.543 343.250 59.086 C 356.900 31.429 395.750 33.029 406.460 57.029 C 429.770 40.114 457.490 55.429 456.860 80.800 C 481.010 78.514 488.150 114.857 469.460 126.743 C 487.730 148.686 461.900 170.171 443.420 162.857 C 429.980 188.457 392.600 185.486 384.200 170.400 C 355.850 189.143 332.750 181.143 325.610 166.971 C 311.540 175.200 298.100 168.571 294.950 152.571 Z" fill="white" />
+<g clip-path="url(#rsi-static-clip-target_air)" mask="url(#rsi-static-fade-target_air)"><g filter="url(#rsi-static-ink-target-air)" data-ink-component="target_air"><svg x="285.0" y="38.0" width="190" height="140" viewBox="0 170 1254 885" preserveAspectRatio="xMidYMid meet" overflow="hidden"><image data-load-href="assets/rsi/images/target_air.png" width="1254" height="1254" /></svg></g></g>
+<path d="M 294.950 152.571 C 280.880 150.286 279.200 130.857 288.860 121.257 C 276.050 106.857 284.450 81.714 301.880 80.571 C 298.730 57.257 327.500 43.543 343.250 59.086 C 356.900 31.429 395.750 33.029 406.460 57.029 C 429.770 40.114 457.490 55.429 456.860 80.800 C 481.010 78.514 488.150 114.857 469.460 126.743 C 487.730 148.686 461.900 170.171 443.420 162.857 C 429.980 188.457 392.600 185.486 384.200 170.400 C 355.850 189.143 332.750 181.143 325.610 166.971 C 311.540 175.200 298.100 168.571 294.950 152.571 Z" fill="none" stroke="#2C557B" stroke-width="4.156" />
+</g><g class="apr-rsi__verdict" data-verdict="pass" transform="translate(440.2 42.5) scale(0.6481481481481481) rotate(-9 27 26)"><rect width="54" height="52" rx="5" fill="white" stroke="#2C557B" stroke-width="4.764" /><rect x="4" y="4" width="46" height="44" rx="2" fill="none" stroke="#2C557B" stroke-width="2.382" /><path d="M14 26 L23 35 L40 14" fill="none" stroke="#2C557B" stroke-width="5.717" stroke-linecap="round" stroke-linejoin="round" /></g>
+<g class="apr-rsi__bubble" data-component="target_land">
+<defs><clipPath id="rsi-static-clip-target_land"><path d="M 534.950 152.571 C 520.880 150.286 519.200 130.857 528.860 121.257 C 516.050 106.857 524.450 81.714 541.880 80.571 C 538.730 57.257 567.500 43.543 583.250 59.086 C 596.900 31.429 635.750 33.029 646.460 57.029 C 669.770 40.114 697.490 55.429 696.860 80.800 C 721.010 78.514 728.150 114.857 709.460 126.743 C 727.730 148.686 701.900 170.171 683.420 162.857 C 669.980 188.457 632.600 185.486 624.200 170.400 C 595.850 189.143 572.750 181.143 565.610 166.971 C 551.540 175.200 538.100 168.571 534.950 152.571 Z" /></clipPath><mask id="rsi-static-fade-target_land" maskUnits="userSpaceOnUse" x="515.0" y="28.0" width="210" height="160"><rect x="515.0" y="28.0" width="210" height="160" fill="url(#rsi-static-edge-fade)" /></mask></defs>
+<path d="M 534.950 152.571 C 520.880 150.286 519.200 130.857 528.860 121.257 C 516.050 106.857 524.450 81.714 541.880 80.571 C 538.730 57.257 567.500 43.543 583.250 59.086 C 596.900 31.429 635.750 33.029 646.460 57.029 C 669.770 40.114 697.490 55.429 696.860 80.800 C 721.010 78.514 728.150 114.857 709.460 126.743 C 727.730 148.686 701.900 170.171 683.420 162.857 C 669.980 188.457 632.600 185.486 624.200 170.400 C 595.850 189.143 572.750 181.143 565.610 166.971 C 551.540 175.200 538.100 168.571 534.950 152.571 Z" fill="white" />
+<g clip-path="url(#rsi-static-clip-target_land)" mask="url(#rsi-static-fade-target_land)"><g filter="url(#rsi-static-ink-target-land)" data-ink-component="target_land"><svg x="525.0" y="38.0" width="190" height="140" viewBox="10 130 1235 975" preserveAspectRatio="xMidYMid meet" overflow="hidden"><image data-load-href="assets/rsi/images/target_land.png" width="1254" height="1254" /></svg></g></g>
+<path d="M 534.950 152.571 C 520.880 150.286 519.200 130.857 528.860 121.257 C 516.050 106.857 524.450 81.714 541.880 80.571 C 538.730 57.257 567.500 43.543 583.250 59.086 C 596.900 31.429 635.750 33.029 646.460 57.029 C 669.770 40.114 697.490 55.429 696.860 80.800 C 721.010 78.514 728.150 114.857 709.460 126.743 C 727.730 148.686 701.900 170.171 683.420 162.857 C 669.980 188.457 632.600 185.486 624.200 170.400 C 595.850 189.143 572.750 181.143 565.610 166.971 C 551.540 175.200 538.100 168.571 534.950 152.571 Z" fill="none" stroke="#2C557B" stroke-width="4.156" />
+</g><g class="apr-rsi__verdict" data-verdict="pass" transform="translate(680.2 42.5) scale(0.6481481481481481) rotate(-9 27 26)"><rect width="54" height="52" rx="5" fill="white" stroke="#2C557B" stroke-width="4.764" /><rect x="4" y="4" width="46" height="44" rx="2" fill="none" stroke="#2C557B" stroke-width="2.382" /><path d="M14 26 L23 35 L40 14" fill="none" stroke="#2C557B" stroke-width="5.717" stroke-linecap="round" stroke-linejoin="round" /></g>
+<g class="apr-rsi__bubble" data-component="environment_sea">
+<defs><clipPath id="rsi-static-clip-environment_sea"><path d="M 61.025 325.000 C 47.960 323.000 46.400 306.000 55.370 297.600 C 43.475 285.000 51.275 263.000 67.460 262.000 C 64.535 241.600 91.250 229.600 105.875 243.200 C 118.550 219.000 154.625 220.400 164.570 241.400 C 186.215 226.600 211.955 240.000 211.370 262.200 C 233.795 260.200 240.425 292.000 223.070 302.400 C 240.035 321.600 216.050 340.400 198.890 334.000 C 186.410 356.400 151.700 353.800 143.900 340.600 C 117.575 357.000 96.125 350.000 89.495 337.600 C 76.430 344.800 63.950 339.000 61.025 325.000 Z" /></clipPath><mask id="rsi-static-fade-environment_sea" maskUnits="userSpaceOnUse" x="42.5" y="216.0" width="195" height="140"><rect x="42.5" y="216.0" width="195" height="140" fill="url(#rsi-static-edge-fade)" /></mask></defs>
+<path d="M 61.025 325.000 C 47.960 323.000 46.400 306.000 55.370 297.600 C 43.475 285.000 51.275 263.000 67.460 262.000 C 64.535 241.600 91.250 229.600 105.875 243.200 C 118.550 219.000 154.625 220.400 164.570 241.400 C 186.215 226.600 211.955 240.000 211.370 262.200 C 233.795 260.200 240.425 292.000 223.070 302.400 C 240.035 321.600 216.050 340.400 198.890 334.000 C 186.410 356.400 151.700 353.800 143.900 340.600 C 117.575 357.000 96.125 350.000 89.495 337.600 C 76.430 344.800 63.950 339.000 61.025 325.000 Z" fill="white" />
+<g clip-path="url(#rsi-static-clip-environment_sea)" mask="url(#rsi-static-fade-environment_sea)"><svg x="59.5" y="233.0" width="161" height="106" viewBox="20 380 1225 755" preserveAspectRatio="xMidYMid meet" overflow="hidden"><image data-load-href="assets/rsi/images/environment_sea-w.svg" width="1254" height="1254" /></svg></g>
+<path d="M 61.025 325.000 C 47.960 323.000 46.400 306.000 55.370 297.600 C 43.475 285.000 51.275 263.000 67.460 262.000 C 64.535 241.600 91.250 229.600 105.875 243.200 C 118.550 219.000 154.625 220.400 164.570 241.400 C 186.215 226.600 211.955 240.000 211.370 262.200 C 233.795 260.200 240.425 292.000 223.070 302.400 C 240.035 321.600 216.050 340.400 198.890 334.000 C 186.410 356.400 151.700 353.800 143.900 340.600 C 117.575 357.000 96.125 350.000 89.495 337.600 C 76.430 344.800 63.950 339.000 61.025 325.000 Z" fill="none" stroke="#2C557B" stroke-width="4.156" />
+</g>
+<g class="apr-rsi__bubble" data-component="environment_sky">
+<defs><clipPath id="rsi-static-clip-environment_sky"><path d="M 301.025 325.000 C 287.960 323.000 286.400 306.000 295.370 297.600 C 283.475 285.000 291.275 263.000 307.460 262.000 C 304.535 241.600 331.250 229.600 345.875 243.200 C 358.550 219.000 394.625 220.400 404.570 241.400 C 426.215 226.600 451.955 240.000 451.370 262.200 C 473.795 260.200 480.425 292.000 463.070 302.400 C 480.035 321.600 456.050 340.400 438.890 334.000 C 426.410 356.400 391.700 353.800 383.900 340.600 C 357.575 357.000 336.125 350.000 329.495 337.600 C 316.430 344.800 303.950 339.000 301.025 325.000 Z" /></clipPath><mask id="rsi-static-fade-environment_sky" maskUnits="userSpaceOnUse" x="282.5" y="216.0" width="195" height="140"><rect x="282.5" y="216.0" width="195" height="140" fill="url(#rsi-static-edge-fade)" /></mask></defs>
+<path d="M 301.025 325.000 C 287.960 323.000 286.400 306.000 295.370 297.600 C 283.475 285.000 291.275 263.000 307.460 262.000 C 304.535 241.600 331.250 229.600 345.875 243.200 C 358.550 219.000 394.625 220.400 404.570 241.400 C 426.215 226.600 451.955 240.000 451.370 262.200 C 473.795 260.200 480.425 292.000 463.070 302.400 C 480.035 321.600 456.050 340.400 438.890 334.000 C 426.410 356.400 391.700 353.800 383.900 340.600 C 357.575 357.000 336.125 350.000 329.495 337.600 C 316.430 344.800 303.950 339.000 301.025 325.000 Z" fill="white" />
+<g clip-path="url(#rsi-static-clip-environment_sky)" mask="url(#rsi-static-fade-environment_sky)"><svg x="299.5" y="233.0" width="161" height="106" viewBox="10 110 1230 1100" preserveAspectRatio="xMidYMid meet" overflow="hidden"><image data-load-href="assets/rsi/images/environment_sky-w.svg" width="1254" height="1254" /></svg></g>
+<path d="M 301.025 325.000 C 287.960 323.000 286.400 306.000 295.370 297.600 C 283.475 285.000 291.275 263.000 307.460 262.000 C 304.535 241.600 331.250 229.600 345.875 243.200 C 358.550 219.000 394.625 220.400 404.570 241.400 C 426.215 226.600 451.955 240.000 451.370 262.200 C 473.795 260.200 480.425 292.000 463.070 302.400 C 480.035 321.600 456.050 340.400 438.890 334.000 C 426.410 356.400 391.700 353.800 383.900 340.600 C 357.575 357.000 336.125 350.000 329.495 337.600 C 316.430 344.800 303.950 339.000 301.025 325.000 Z" fill="none" stroke="#2C557B" stroke-width="4.156" />
+</g>
+<g class="apr-rsi__bubble" data-component="environment_terrain">
+<defs><clipPath id="rsi-static-clip-environment_terrain"><path d="M 541.025 325.000 C 527.960 323.000 526.400 306.000 535.370 297.600 C 523.475 285.000 531.275 263.000 547.460 262.000 C 544.535 241.600 571.250 229.600 585.875 243.200 C 598.550 219.000 634.625 220.400 644.570 241.400 C 666.215 226.600 691.955 240.000 691.370 262.200 C 713.795 260.200 720.425 292.000 703.070 302.400 C 720.035 321.600 696.050 340.400 678.890 334.000 C 666.410 356.400 631.700 353.800 623.900 340.600 C 597.575 357.000 576.125 350.000 569.495 337.600 C 556.430 344.800 543.950 339.000 541.025 325.000 Z" /></clipPath><mask id="rsi-static-fade-environment_terrain" maskUnits="userSpaceOnUse" x="522.5" y="216.0" width="195" height="140"><rect x="522.5" y="216.0" width="195" height="140" fill="url(#rsi-static-edge-fade)" /></mask></defs>
+<path d="M 541.025 325.000 C 527.960 323.000 526.400 306.000 535.370 297.600 C 523.475 285.000 531.275 263.000 547.460 262.000 C 544.535 241.600 571.250 229.600 585.875 243.200 C 598.550 219.000 634.625 220.400 644.570 241.400 C 666.215 226.600 691.955 240.000 691.370 262.200 C 713.795 260.200 720.425 292.000 703.070 302.400 C 720.035 321.600 696.050 340.400 678.890 334.000 C 666.410 356.400 631.700 353.800 623.900 340.600 C 597.575 357.000 576.125 350.000 569.495 337.600 C 556.430 344.800 543.950 339.000 541.025 325.000 Z" fill="white" />
+<g clip-path="url(#rsi-static-clip-environment_terrain)" mask="url(#rsi-static-fade-environment_terrain)"><svg x="539.5" y="233.0" width="161" height="106" viewBox="10 300 1230 745" preserveAspectRatio="xMidYMid meet" overflow="hidden"><image data-load-href="assets/rsi/images/environment_terrain-w.svg" width="1254" height="1254" /></svg></g>
+<path d="M 541.025 325.000 C 527.960 323.000 526.400 306.000 535.370 297.600 C 523.475 285.000 531.275 263.000 547.460 262.000 C 544.535 241.600 571.250 229.600 585.875 243.200 C 598.550 219.000 634.625 220.400 644.570 241.400 C 666.215 226.600 691.955 240.000 691.370 262.200 C 713.795 260.200 720.425 292.000 703.070 302.400 C 720.035 321.600 696.050 340.400 678.890 334.000 C 666.410 356.400 631.700 353.800 623.900 340.600 C 597.575 357.000 576.125 350.000 569.495 337.600 C 556.430 344.800 543.950 339.000 541.025 325.000 Z" fill="none" stroke="#2C557B" stroke-width="4.156" />
+</g>
+<g class="apr-rsi__bubble" data-component="failed_water">
+<defs><clipPath id="rsi-static-clip-failed_water"><path d="M 140.200 526.214 C 129.480 524.357 128.200 508.571 135.560 500.771 C 125.800 489.071 132.200 468.643 145.480 467.714 C 143.080 448.771 165.000 437.629 177.000 450.257 C 187.400 427.786 217.000 429.086 225.160 448.586 C 242.920 434.843 264.040 447.286 263.560 467.900 C 281.960 466.043 287.400 495.571 273.160 505.229 C 287.080 523.057 267.400 540.514 253.320 534.571 C 243.080 555.371 214.600 552.957 208.200 540.700 C 186.600 555.929 169.000 549.429 163.560 537.914 C 152.840 544.600 142.600 539.214 140.200 526.214 Z" /></clipPath><mask id="rsi-static-fade-failed_water" maskUnits="userSpaceOnUse" x="125.0" y="425.0" width="160" height="130"><rect x="125.0" y="425.0" width="160" height="130" fill="url(#rsi-static-edge-fade)" /></mask></defs>
+<path d="M 140.200 526.214 C 129.480 524.357 128.200 508.571 135.560 500.771 C 125.800 489.071 132.200 468.643 145.480 467.714 C 143.080 448.771 165.000 437.629 177.000 450.257 C 187.400 427.786 217.000 429.086 225.160 448.586 C 242.920 434.843 264.040 447.286 263.560 467.900 C 281.960 466.043 287.400 495.571 273.160 505.229 C 287.080 523.057 267.400 540.514 253.320 534.571 C 243.080 555.371 214.600 552.957 208.200 540.700 C 186.600 555.929 169.000 549.429 163.560 537.914 C 152.840 544.600 142.600 539.214 140.200 526.214 Z" fill="white" />
+<g clip-path="url(#rsi-static-clip-failed_water)" mask="url(#rsi-static-fade-failed_water)"><g filter="url(#rsi-static-ink-failed-water)" data-ink-component="failed_water"><svg x="132.0" y="432.0" width="146" height="116" viewBox="0 100 1254 1100" preserveAspectRatio="xMidYMid meet" overflow="hidden"><image data-load-href="assets/rsi/images/failed_water.png" width="1254" height="1254" /></svg></g></g>
+<path d="M 140.200 526.214 C 129.480 524.357 128.200 508.571 135.560 500.771 C 125.800 489.071 132.200 468.643 145.480 467.714 C 143.080 448.771 165.000 437.629 177.000 450.257 C 187.400 427.786 217.000 429.086 225.160 448.586 C 242.920 434.843 264.040 447.286 263.560 467.900 C 281.960 466.043 287.400 495.571 273.160 505.229 C 287.080 523.057 267.400 540.514 253.320 534.571 C 243.080 555.371 214.600 552.957 208.200 540.700 C 186.600 555.929 169.000 549.429 163.560 537.914 C 152.840 544.600 142.600 539.214 140.200 526.214 Z" fill="none" stroke="#2C557B" stroke-width="4.156" />
+</g><g class="apr-rsi__verdict" data-verdict="fail" transform="translate(249.2 436.0) scale(0.5555555555555556) rotate(10 27 26)"><rect width="54" height="52" rx="5" fill="white" stroke="#2C557B" stroke-width="5.557" /><rect x="4" y="4" width="46" height="44" rx="2" fill="none" stroke="#2C557B" stroke-width="2.779" /><path d="M16 15 L38 37 M38 15 L16 37" fill="none" stroke="#2C557B" stroke-width="6.668" stroke-linecap="round" stroke-linejoin="round" /></g>
+<image class="apr-rsi__hero" data-component="welding" data-load-href="assets/rsi/images/welding-native-w.png?v=38c400340cb47d43" x="141.15" y="269.2" width="520" height="520" />
+<path class="apr-rsi__route apr-rsi__final-tip" d="M361.4337662 608.9652758 Q367.4337662 602.9652758 372.9337662 593.9652758" marker-end="url(#rsi-static-feedback-tip)" />
+</svg>
+</figure>
+</div></div>
+            <div class="missions-pane missions-ai4e" aria-labelledby="engineering-title" hidden>
+              <picture class="missions-frame"><source data-load-srcset="assets/missions/ai4e-scene1.webp?v=38c400340cb47d43" type="image/webp"><img data-load-src="assets/missions/ai4e-scene1.png?v=38c400340cb47d43" alt="An engineer gives a specification while mascots build a large machine together." width="1024" height="1024" loading="lazy" decoding="async" fetchpriority="low"></picture>
+              <picture class="missions-frame"><source data-load-srcset="assets/missions/ai4e-scene2.webp?v=38c400340cb47d43" type="image/webp"><img data-load-src="assets/missions/ai4e-scene2.png?v=38c400340cb47d43" alt="A mascot hands a wrench, handle first, to an engineer." width="1024" height="1024" loading="lazy" decoding="async" fetchpriority="low"></picture>
+            </div>
+          </div>
+          <p class="sr-only" id="missions-help">Playback loops continuously. Select a mission to restart from it. Hover over the names or focus a control to pause. Playback pauses outside the viewport, in background tabs, and with reduced motion.</p>
+          <p class="sr-only missions-status" role="status" aria-live="polite"></p>
+        </div>
+      </div>
+    </section>
+
+    <section class="block citation" id="cite" aria-labelledby="citation-title">
+      <div class="wrap citation-grid">
+        <h2 id="citation-title">BibTeX</h2>
+        <div class="bib">
+          <div class="bib-toolbar"><button id="copy" type="button" hidden>Copy BibTeX</button></div>
+          <pre id="bibtex">@inproceedings{deng2026construction,
+  title     = {Evaluating Physical Reasoning in {LLM} Agents Requires Construction Benchmarks},
+  author    = {Deng, Wenhao and Xia, Tian and Jiang, Yuru and Jose, Joemon M. and Wu, Tailin},
+  booktitle = {Advances in Neural Information Processing Systems},
+  year      = {2026},
+  note      = {Position Paper Track},
+  url       = {https://openreview.net/forum?id=42PVaAYxLX}
+}</pre>
+          <p id="copy-status" class="copy-status" role="status" aria-live="polite"></p>
+        </div>
+      </div>
+    </section>
+  </main>
+  <footer class="footer">
+    <div class="footer-frame" data-scroll-watermark="footer">
+      <div class="footer-art" data-hatch><img data-load-src="assets/brand/uniforce-zh.svg?v=38c400340cb47d43" alt="原力引擎 · UNIFORCE AI" width="1600" height="592" loading="lazy" decoding="async" draggable="false" fetchpriority="low"></div>
+    </div>
+  </footer>
+</body>
+</html>

@@ -1,0 +1,19 @@
+{
+  "title": "Blue Marble (2002): Land Surface, Ocean Color, Sea Ice, and Clouds",
+  "credit": "NASA Goddard Space Flight Center; Reto Stöckli and Robert Simmon",
+  "source": "https://eoimages.gsfc.nasa.gov/images/imagerecords/57000/57735/land_ocean_ice_cloud_2048.jpg",
+  "catalog": "https://visibleearth.nasa.gov/view.php?id=57735",
+  "article": "https://science.nasa.gov/earth/earth-observatory/the-blue-marble-true-color-global-imagery-at-1km-resolution/",
+  "usage_guidelines": "https://www.nasa.gov/nasa-brand-center/images-and-media/",
+  "usage": "NASA imagery, public domain in the United States unless otherwise indicated. The source article makes these images freely available to the public. Credit retained; no endorsement implied.",
+  "downloaded": "2026-10-31",
+  "dimensions": [
+    2048,
+    1024
+  ],
+  "bytes": 593729,
+  "sha256": "fb67ac030214c1891994c8f976e7f6c9cd5b0f21586aba8567250781a4fe708e",
+  "processing": "Original JPEG retained. Seven levels per color channel applied in the runtime shader; three lighting bands. Earth and Moon are deliberately enlarged scenery.",
+  "attribution_page": "https://science.nasa.gov/earth/earth-observatory/the-blue-marble-true-color-global-imagery-at-1km-resolution/",
+  "catalog_note": "Checked 2026-10-31: the old Visible Earth catalog URL redirects to the Earth Observatory homepage. Attribution links use the original Blue Marble article at its current NASA Science address."
+}

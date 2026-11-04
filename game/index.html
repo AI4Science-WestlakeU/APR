@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#142d41">
+  <meta name="description" content="Leap the Grand Canyon. A tiny Mars. A distant home.">
+  <title>Leap the Grand Canyon</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Ccircle cx='20' cy='20' r='19' fill='%23ba6a4e'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="game.css?v=38c400340cb47d43">
+  <script type="importmap">{"imports":{"three":"./vendor/three/three.module.min.js","three/addons/":"./vendor/three/addons/"}}</script>
+</head>
+<body>
+<main id="yard" aria-label="Leap the Grand Canyon" data-hud-mode="full">
+  <canvas id="world" tabindex="-1" aria-label="W A S D: move or drive. Space: jump on foot, brake in rover. Click: capture mouse. Mouse: look. Left click: place deck at crosshair. Right click: remove aimed deck. B: fit. E: board. F: fuel. Tab: parts. R: checkpoint. P or Escape: pause. H: HUD."></canvas>
+  <div id="crosshair" hidden aria-hidden="true"><i></i></div>
+  <svg class="control-symbols" width="0" height="0" aria-hidden="true"><defs>
+    <symbol id="mouse-shape" viewBox="0 0 32 32"><rect x="8" y="3" width="16" height="26" rx="8"/><path d="M8 14h16M16 3v11"/></symbol>
+    <symbol id="mouse-left" viewBox="0 0 32 32"><path class="mouse-highlight" d="M16 4a7 7 0 0 0-7 7v3h7Z"/><use href="#mouse-shape"/></symbol>
+    <symbol id="mouse-right" viewBox="0 0 32 32"><path class="mouse-highlight" d="M16 4a7 7 0 0 1 7 7v3h-7Z"/><use href="#mouse-shape"/></symbol>
+    <symbol id="mouse-look" viewBox="0 0 32 32"><use href="#mouse-shape"/><path d="M2 11v11m-2-8 2-3 2 3m-4 5 2 3 2-3m26-8v11m-2-8 2-3 2 3m-4 5 2 3 2-3"/></symbol>
+    <symbol id="mouse-wheel" viewBox="0 0 32 32"><use href="#mouse-shape"/><path class="mouse-highlight" d="M14 7h4v7h-4Z"/></symbol>
+  </defs></svg>
+  <div id="cover">
+    <div class="cover-shade"></div>
+    <div class="cover-copy">
+      <h1>Leap the<br>Grand Canyon</h1>
+      <p class="cover-description">A tiny Mars. A distant home.</p>
+      <button id="play" class="primary"><span class="play-symbol">▶</span> <span id="play-label">Play</span></button>
+      <p id="load-status" role="status"></p>
+    </div>
+    <p class="cover-credit"><a href="https://science.nasa.gov/earth/earth-observatory/the-blue-marble-true-color-global-imagery-at-1km-resolution/" target="_blank" rel="noopener noreferrer">Earth imagery: NASA / Visible Earth</a></p>
+    <noscript><p class="no-script">JavaScript required.</p></noscript>
+  </div>
+  <div id="view-controls">
+    <button id="hud-toggle" hidden aria-label="HUD: full. Switch to compact" title="HUD · H" aria-keyshortcuts="H">HUD</button>
+    <button id="fullscreen" aria-label="Enter fullscreen" title="Fullscreen" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path class="expand" d="M9 3H3v6m12-6h6v6M3 15v6h6m12-6v6h-6"/><path class="contract" d="M3 9h6V3m12 6h-6V3M9 21v-6H3m12 6v-6h6"/></svg></button>
+  </div>
+  <p id="view-status" role="status"></p>
+  <div id="hud" hidden>
+    <header class="topbar">
+      <div class="top-actions"><div class="clock"><span>TIME LEFT</span><output id="time">15:00</output></div><button id="help-toggle" class="hud-detail" aria-label="Show controls" title="Controls">?</button><button id="pause" class="hud-detail" aria-label="Pause game" title="Pause · P / Esc">Ⅱ</button></div>
+    </header>
+    <aside id="workbench" class="workbench hud-detail">
+      <div class="section-caption"><span id="zone-name">GARAGE</span><button id="bench-toggle" aria-label="Collapse assembly panel">−</button></div>
+      <div id="bench-content">
+        <h2 id="build-heading">Assembly</h2>
+        <p id="build-description">1–4 engines · 95 kg / 2.5 kW each</p>
+        <div id="assembly-list" aria-label="Assembly checklist"></div>
+        <button id="install" class="primary small-primary">Fit short chassis <kbd>B</kbd></button>
+        <div class="bench-actions"><button id="remove-part">Undo part</button><button id="board">Enter rover <kbd>E</kbd></button></div>
+        <button id="fuel" class="fuel-button">Start refuelling <kbd>F</kbd></button>
+        <p id="fuel-note">LOX : CH₄ = 3.6 : 1</p>
+        <div id="bridge-status"><span>BRIDGE CONNECTIONS</span><strong id="bridge-count">0 / 10 decks</strong><div class="stress-meter"><i id="stress-fill"></i></div><div class="stress-key"><span>safe</span><span>loaded</span><span>breaks at 100%</span></div><output id="stress-label">No joints yet</output></div>
+      </div>
+    </aside>
+    <div id="notice" class="hud-detail" role="status"></div>
+    <div id="flight-tag" class="hud-detail" hidden><span class="dot"></span> AIRBORNE</div>
+    <section class="dashboard" aria-label="Racing instruments">
+      <div class="fuel-instruments hud-detail">
+        <div class="instrument-title">PROPELLANT <span id="fuel-state">STATION READY</span></div>
+        <div class="fuel-reading"><label>CH₄ <small>METHANE</small></label><output id="methane">0.0 <small>kg</small></output></div><div class="fuel-meter"><i id="methane-bar"></i></div>
+        <div class="fuel-reading"><label>O₂ <small>LIQUID OXYGEN</small></label><output id="oxygen">0.0 <small>kg</small></output></div><div class="fuel-meter oxygen"><i id="oxygen-bar"></i></div>
+        <div class="mass-reading"><span>TOTAL MASS</span><output id="mass">30 <small>kg</small></output></div>
+      </div>
+      <div class="speed-instrument">
+        <svg viewBox="0 0 260 158" aria-hidden="true"><path class="gauge-track" d="M30 130 A100 100 0 0 1 230 130"/><path id="speed-arc" class="gauge-value" pathLength="100" d="M30 130 A100 100 0 0 1 230 130"/><path class="power-track" d="M45 130 A85 85 0 0 1 215 130"/><path id="power-arc" class="power-value" pathLength="100" d="M45 130 A85 85 0 0 1 215 130"/><g class="ticks"><text x="15" y="144">0</text><text x="36" y="62">5</text><text x="120" y="17">10</text><text x="210" y="62">15</text><text x="237" y="144">20</text></g><line id="needle-outline" x1="130" y1="130" x2="130" y2="38"/><line id="needle" x1="130" y1="130" x2="130" y2="38"/></svg>
+        <div class="speed-digits"><output id="speed">0.0</output><span>m/s <i>·</i> <output id="kmh">0</output> km/h</span></div>
+        <div class="power-reading hud-detail"><span id="drive-mode">ON FOOT</span><output id="power">0.0 kW</output></div>
+        <div id="engine-status" class="engine-status hud-detail" role="group" aria-label="Engines: 0 of 4 installed">
+          <span data-engine="0" data-state="absent" role="img" aria-label="Engine 1: not installed"></span><span data-engine="1" data-state="absent" role="img" aria-label="Engine 2: not installed"></span><span data-engine="2" data-state="absent" role="img" aria-label="Engine 3: not installed"></span><span data-engine="3" data-state="absent" role="img" aria-label="Engine 4: not installed"></span>
+        </div>
+      </div>
+      <div class="aux-instruments hud-detail"><div class="instrument-title">TELEMETRY</div><div class="aux-row"><span id="acceleration-label">VERTICAL a</span><output id="acceleration">0.0 <small>m/s²</small></output></div><div class="aux-row"><span>EARTH g</span><output id="g-force">0.00 <small>g</small></output></div><div class="aux-divider"></div><div class="aux-row"><span>TO FAR BANK</span><output id="distance">56.5 <small>m</small></output></div><div class="aux-row"><span>ABOVE FLOOR</span><output id="height">25.0 <small>m</small></output></div><p id="load-caption">Pilot 30 kg · Mars 3.71 m/s²</p></div>
+    </section>
+    <div class="inventory-area hud-detail"><div class="selection-line"><span id="selection-name">SHORT CHASSIS <small>14 kg</small></span><span id="part-count">0 fitted</span></div><nav id="hotbar" aria-label="Parts inventory. Keys 1 to 7."></nav></div>
+    <div class="control-strip hud-detail" aria-label="Keyboard and mouse controls">
+      <div><span class="input-key"><svg class="mouse-icon" role="img" aria-label="Move mouse"><use href="#mouse-look"/></svg></span><span>Look</span></div>
+      <div><span class="input-key"><kbd>W A S D</kbd></span><span id="hint-move">Walk</span></div>
+      <div><span class="input-key"><kbd>Space</kbd></span><span id="hint-space">Jump</span></div>
+      <div><span class="input-key"><svg class="mouse-icon" role="img" aria-label="Left mouse button"><use href="#mouse-left"/></svg></span><span>Place</span></div>
+      <div><span class="input-key"><svg class="mouse-icon" role="img" aria-label="Right mouse button"><use href="#mouse-right"/></svg></span><span>Remove</span></div>
+      <div><span class="input-key"><kbd>B</kbd></span><span>Fit</span></div>
+      <div><span class="input-key"><kbd>E</kbd></span><span>Enter / exit</span></div>
+      <div><span class="input-key"><kbd>F</kbd></span><span>Refuel</span></div>
+      <div><span class="input-key"><kbd>1–9</kbd><svg class="mouse-icon" role="img" aria-label="Mouse wheel"><use href="#mouse-wheel"/></svg></span><span>Inventory</span></div>
+      <div><span class="input-key"><kbd>Tab</kbd></span><span>Parts</span></div>
+      <button id="recover"><span class="input-key"><kbd>R</kbd></span><span>Checkpoint</span></button>
+      <div><span class="input-key"><kbd>H</kbd></span><span>HUD</span></div>
+      <div><span class="input-key"><kbd>P</kbd><kbd>Esc</kbd></span><span>Pause</span></div>
+    </div>
+    <p class="asset-credit hud-detail"><a href="https://science.nasa.gov/earth/earth-observatory/the-blue-marble-true-color-global-imagery-at-1km-resolution/" target="_blank" rel="noopener noreferrer">Earth imagery: NASA / Visible Earth</a></p>
+    <div id="touch-controls" class="hud-detail" aria-label="Touch controls">
+      <div id="joystick" role="group" aria-label="Movement joystick"><span id="stick-thumb"></span></div>
+      <div class="touch-actions"><button data-hold="Space" aria-label="Jump">JUMP</button><button id="touch-place">PLACE</button><button id="touch-remove">REMOVE</button><button id="touch-fit">FIT</button><button id="touch-parts">PARTS</button></div>
+    </div>
+  </div>
+  <section id="help" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="help-title"><div class="sheet"><h2 id="help-title">Controls</h2><dl><dt>Click scene · mouse</dt><dd>Capture mouse · look around</dd><dt>W A S D</dt><dd>Move relative to camera · steer rover toward camera heading</dd><dt>Space</dt><dd>Jump on foot · brake in rover</dd><dt>Left / right click</dt><dd>Place at deck outline / remove aimed deck</dd><dt>B · Fit</dt><dd>Fit selected rover part at garage</dd><dt>E · F</dt><dd>Enter / exit stopped rover · start / stop refuelling</dd><dt>1–9 · wheel</dt><dd>Select inventory slot · 8 and 9 are empty</dd><dt>Tab</dt><dd>Open parts and release mouse · close and capture</dd><dt>7 · Place × 10</dt><dd>Aim at each deck outline from the garage or bridgehead</dd><dt>R</dt><dd>Restore checkpoint · keep elapsed time</dd><dt>H</dt><dd>Full → speed + time → hidden</dd><dt>P · Esc</dt><dd>Pause and release mouse · Resume to capture again</dd><dt>Touch</dt><dd>Left joystick · right half: look · Jump / Place / Remove / Fit</dd></dl><p class="world-note">Rover: chassis, 2 axle mounts, 4 wheels, 1–4 engines, tank. Short chassis: 1 tank; long: 2. First jump: 2–3 engines, 3 kg CH₄ + 10.8 kg LOX. Extra engines add mass and consume more propellant.</p><p class="world-note">Engine indicators: outline = absent; navy = idle; yellow = thrust; grey × = empty or overheated. Release throttle to cool.</p><p class="world-note">Reach the far-bank flag on the ground. Falls, overturns and the 15-minute limit end the run. Bridge joints break at 100% load.</p><button id="help-close" class="primary">Resume</button></div></section>
+  <section id="paused" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="pause-title"><div class="pause-sheet"><h2 id="pause-title">Paused</h2><p id="pause-reason">Physics and timer paused.</p><button id="resume" class="primary">Resume</button></div></section>
+  <section id="result" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="result-title"><div class="result-sheet"><h2 id="result-title">PASS</h2><p id="result-reason">Reached the far-bank flag.</p><div class="result-stats"><div><span>ELAPSED</span><output id="result-time">00:00</output></div><div><span id="result-mass-label">ROVER MASS</span><output id="result-mass">0 kg</output></div><div><span>PARTS</span><output id="result-parts">0</output></div></div><p id="result-note"></p><button id="retry" class="primary">Retry checkpoint</button><button id="new-run" class="text-button">New run · reset timer</button></div></section>
+</main>
+<script src="boot.js?v=38c400340cb47d43" defer></script>
+</body>
+</html>

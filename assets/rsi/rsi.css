@@ -1,0 +1,27 @@
+[data-apr-rsi] {
+  width: 100%;
+  max-width: 760px;
+  aspect-ratio: 1;
+  margin-inline: auto;
+}
+.apr-rsi__figure { margin: 0; width: 100%; }
+.apr-rsi__art { display: block; width: 100%; height: auto; overflow: hidden; }
+.apr-rsi__art image { pointer-events: none; }
+.apr-rsi__route {
+  fill: none;
+  stroke: #EFD159;
+  stroke-width: 3.088;
+  stroke-dasharray: 7.56 17.65;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.apr-rsi__art .apr-rsi__final-tip { stroke-dasharray: none; }
+.apr-rsi__particle { display: none; }
+.apr-rsi__art[data-motion="running"] .apr-rsi__particle { display: inline; }
+.apr-rsi__dot { fill: #EFD159; stroke: #b58d12; stroke-width: 0.55125; }
+@media (prefers-reduced-motion: reduce) {
+  .apr-rsi__particle { display: none !important; }
+}
+@media print {
+  .apr-rsi__particle { display: none !important; }
+}
