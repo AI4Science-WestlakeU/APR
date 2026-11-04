@@ -49,9 +49,8 @@ a.btn:hover{background:var(--deep);color:#fff;border-color:var(--deep)}
 .btn-reveal{display:inline-flex;align-items:stretch}
 .btn-reveal .btn-more{max-width:0;margin-left:0;padding-inline:0;border-width:0;opacity:0;overflow:hidden;white-space:nowrap;transform:translateX(-6px);transition:max-width .32s ease,margin-left .32s ease,padding .32s ease,opacity .2s ease,transform .32s ease,border-width 0s .32s}
 .btn-reveal:hover .btn-more,.btn-reveal:focus-within .btn-more{max-width:180px;margin-left:10px;padding-inline:17px;border-width:1px;opacity:1;transform:none;transition:max-width .32s ease,margin-left .32s ease,padding .32s ease,opacity .24s ease .06s,transform .32s ease}
-@media (hover:none){.btn-reveal .btn-more{max-width:none;margin-left:10px;padding-inline:17px;border-width:1px;opacity:1;transform:none}}
-@media (max-width:760px){.btn-reveal:hover .btn-more,.btn-reveal:focus-within .btn-more{margin-left:8px;padding-inline:13px}}
-@media (hover:none) and (max-width:760px){.btn-reveal .btn-more{margin-left:8px;padding-inline:13px}}
+@media (hover:none) and (min-width:761px){.btn-reveal .btn-more{max-width:none;margin-left:10px;padding-inline:17px;border-width:1px;opacity:1;transform:none}}
+@media (max-width:760px){.btn-reveal .btn-more{display:none}}
 @media (prefers-reduced-motion:reduce){.btn-reveal .btn-more{transition:none}}
 .byline{margin-top:27px}
 .authors{display:flex;flex-wrap:wrap;gap:6px 24px;font-size:20px;font-weight:500;color:var(--ink);line-height:1.6}
@@ -269,20 +268,21 @@ pre{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:1
  .loop-figure{margin-top:44px}
  .text-link{font-size:17px}
  .audit-viewport{padding-right:0}
- .audit-frame{--audit-header-height:115.6875px;--audit-row-height:71.671875px}
+ .audit-frame{--audit-header-height:88.6875px;--audit-row-height:52.78125px}
  .audit-viewport::after{right:8px}
- .audit-scroll{scrollbar-width:thin;scrollbar-color:#c5d0d9 transparent;scrollbar-gutter:stable}
+ .audit-scroll{overflow-x:auto;touch-action:pan-x pan-y pinch-zoom;scrollbar-width:thin;scrollbar-color:#c5d0d9 transparent;scrollbar-gutter:stable}
  .audit-scroll::-webkit-scrollbar{width:6px}
  .audit-scroll::-webkit-scrollbar-track{background:transparent}
  .audit-scroll::-webkit-scrollbar-thumb{background:#c5d0d9;border-radius:6px}
  .audit-scrollbar{display:none}
- .audit-table{font-size:14px}
- .audit-table .benchmark-column{width:27%}
- .audit-table .requirement-column{width:15%}
- .audit-table th,.audit-table td{padding:7px 3px}
+ .audit-table{font-size:14px;table-layout:auto}
+ .audit-table .benchmark-column,.audit-table .requirement-column{width:auto}
+ .audit-table th,.audit-table td{padding:7px 2px}
+ .audit-table .benchmark-heading,.audit-table tbody th{padding-left:2px}
+ .audit-table tbody th{overflow-wrap:normal;word-break:normal;hyphens:none}
  .audit-table thead th{font-size:12px;padding-bottom:12px}
  .audit-table .audit-groups th[scope="colgroup"]{font-size:11px}
- .audit-table .requirement-heading{font-size:10px;overflow-wrap:anywhere}
+ .audit-table .requirement-heading{font-size:10px;overflow-wrap:normal;word-break:normal;white-space:nowrap}
  .audit-table .cap-full{display:none}
  .audit-table .cap-short{display:inline}
  .audit-table abbr{text-decoration:none}

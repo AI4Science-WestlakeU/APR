@@ -1,4 +1,4 @@
-import { readFigure } from "./loop-figure.js?v=38c400340cb47d43";
+import { readFigure } from "./loop-figure.js?v=4e21205885936d83";
 import { drawHatchFallback } from "./hatch-fallback.js";
 const clamp = (value) => Math.max(0, Math.min(1, value));
 const ease = (value) => value < 0.5 ? 4 * value ** 3 : 1 - (-2 * value + 2) ** 3 / 2;
