@@ -1,5 +1,5 @@
-import { createCollapse } from "./nearterm-collapse.js?v=4e21205885936d83";
-import { createEcho } from "./nearterm-echo.js?v=4e21205885936d83";
+import { createCollapse } from "./nearterm-collapse.js?v=bcc17423519306fc";
+import { createEcho } from "./nearterm-echo.js?v=bcc17423519306fc";
 const board = document.querySelector("#near-board");
 window.aprLoad.when(board, "near-term", async () => {
   const copy = board.querySelector(".near-copy");

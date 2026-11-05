@@ -1,6 +1,6 @@
 import * as THREE from "three";
-import { P, engineMounts } from "./physics.js?v=4e21205885936d83";
-import { box, material } from "./landscape.js?v=4e21205885936d83";
+import { P, engineMounts } from "./physics.js?v=bcc17423519306fc";
+import { box, material } from "./landscape.js?v=bcc17423519306fc";
 export function makeRover(game) {
   const root = new THREE.Group(), c = game.count, length = c.long ? 3.7 : 2.8;
   if (!game.parts.length) return { root, wheels: [] };
