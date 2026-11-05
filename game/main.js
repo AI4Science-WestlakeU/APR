@@ -1,10 +1,10 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
-import { CanyonGame, P, KIT, PARTS, radial, groundY, bridgeSlot } from "./physics.js?v=bcc17423519306fc";
-import { makeLandscape } from "./landscape.js?v=bcc17423519306fc";
-import { makeRover, makeDeck, disposeView } from "./vehicle-view.js?v=bcc17423519306fc";
-import { mascotToon, INK, SUN_DIRECTION } from "./style.js?v=bcc17423519306fc";
-import { makeSky } from "./sky.js?v=bcc17423519306fc";
+import { CanyonGame, P, KIT, PARTS, radial, groundY, bridgeSlot } from "./physics.js?v=51cb0f7bd24b26d9";
+import { makeLandscape } from "./landscape.js?v=51cb0f7bd24b26d9";
+import { makeRover, makeDeck, disposeView } from "./vehicle-view.js?v=51cb0f7bd24b26d9";
+import { mascotToon, INK, SUN_DIRECTION } from "./style.js?v=51cb0f7bd24b26d9";
+import { makeSky } from "./sky.js?v=51cb0f7bd24b26d9";
 const icons = {
   small: '<path d="M7 18 24 10 45 18 28 27Z M7 18v7l21 8 17-9v-6 M28 27v6"/><path d="m16 17 10-4 10 4-10 5Z"/>',
   long: '<path d="M4 19 30 7 49 15 22 29Z M4 19v6l18 8 27-12v-6 M22 29v4"/><path d="m12 18 19-8m-12 12 19-8"/>',
