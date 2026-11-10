@@ -1,4 +1,4 @@
-import { readFigure } from "./loop-figure.js?v=51cb0f7bd24b26d9";
+import { readFigure } from "./loop-figure.js?v=cb240510343fb7ac";
 import { drawHatchFallback } from "./hatch-fallback.js";
 const clamp = (value) => Math.max(0, Math.min(1, value));
 const ease = (value) => value < 0.5 ? 4 * value ** 3 : 1 - (-2 * value + 2) ** 3 / 2;
@@ -53,7 +53,8 @@ export async function mountStory() {
     input.filter = "none";
     input.fillStyle = "white";
     input.fillRect(0, 0, width, height);
-    input.filter = "blur(2.5px)";
+    const fine = Math.max(0.55, Math.min(1, width / 900));
+    input.filter = `blur(${2.5 * fine}px)`;
     const scale = width / currentBox[2];
     input.drawImage(source, -currentBox[0] * scale, -currentBox[1] * scale, 3780 * scale, 1620 * scale);
     let pixels;
@@ -72,7 +73,7 @@ export async function mountStory() {
     }
     const paths = [new Path2D(), new Path2D()];
     const bands = [new Float32Array(Math.ceil(width / 2) + 1), new Float32Array(Math.ceil(width / 2) + 1)];
-    for (let y = 2.5; y < height; y += 5) {
+    for (let y = 2.5 * fine; y < height; y += 5 * fine) {
       for (let i = 0; i < bands[0].length; i++) {
         const offset = (Math.floor(y) * width + Math.min(i * 2, width - 1)) * 4;
         const r = pixels[offset] / 255;
@@ -80,8 +81,8 @@ export async function mountStory() {
         const b = pixels[offset + 2] / 255;
         const yellow = Math.min(clamp((r - b - 0.06) * 10), clamp((g - b - 0.03) * 10));
         const ink = (1 - (0.2126 * r + 0.7152 * g + 0.0722 * b)) * (1 - yellow);
-        bands[0][i] = ink < 8e-3 ? 0 : 1.5 * ink ** 0.65;
-        bands[1][i] = yellow < 8e-3 ? 0 : 1.5 * yellow ** 0.65;
+        bands[0][i] = ink < 8e-3 ? 0 : 1.5 * fine * ink ** 0.65;
+        bands[1][i] = yellow < 8e-3 ? 0 : 1.5 * fine * yellow ** 0.65;
       }
       bands.forEach((band, channel) => {
         const path = paths[channel];
@@ -245,7 +246,7 @@ export async function mountStory() {
   new ResizeObserver(() => {
     width = Math.round(stage.clientWidth);
     height = Math.round(stage.clientHeight);
-    const ratio = Math.min(devicePixelRatio || 1, 2);
+    const ratio = Math.min(devicePixelRatio || 1, 3);
     sample.width = width;
     sample.height = height;
     canvas.width = Math.round(width * ratio);

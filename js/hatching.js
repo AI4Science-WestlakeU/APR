@@ -1,8 +1,8 @@
 "use strict";
 (() => {
-  const spacing = 5;
-  const maxWidth = 3;
-  const blur = 2.5;
+  const baseSpacing = 5;
+  const baseMaxWidth = 3;
+  const baseBlur = 2.5;
   const owners = [...document.querySelectorAll("[data-hatch]")];
   const pending = /* @__PURE__ */ new Set();
   const sizes = /* @__PURE__ */ new WeakMap();
@@ -13,7 +13,12 @@
     const width = Math.round(image.clientWidth);
     const height = Math.round(image.clientHeight);
     if (!width || !height) return;
-    const ratio = Math.min(devicePixelRatio || 1, 2);
+    const ratio = Math.min(devicePixelRatio || 1, 3);
+    const fine = Math.max(0.55, Math.min(1, width / 900));
+    const spacing = baseSpacing * fine;
+    const maxWidth = baseMaxWidth * fine;
+    const blur = baseBlur * fine;
+    const step = fine < 1 ? 1 : 2;
     const style = getComputedStyle(image);
     const key = `${width},${height},${ratio},${style.objectPosition}`;
     if (sizes.get(owner) === key) return;
@@ -62,7 +67,7 @@
     }
     for (let y = spacing / 2; y < height; y += spacing) {
       const bands = [[], []];
-      for (let x = 0; x <= width; x += 2) {
+      for (let x = 0; x <= width; x += step) {
         const pixel = (Math.floor(y) * width + Math.min(x, width - 1)) * 4;
         const r = pixels[pixel] / 255;
         const g = pixels[pixel + 1] / 255;

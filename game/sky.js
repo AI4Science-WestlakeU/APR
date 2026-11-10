@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { toon, outline, SUN_DIRECTION } from "./style.js?v=51cb0f7bd24b26d9";
+import { toon, outline, SUN_DIRECTION } from "./style.js?v=cb240510343fb7ac";
 export async function makeSky(scene) {
   const texture = await new THREE.TextureLoader().loadAsync("./assets/earth-blue-marble.jpg");
   texture.colorSpace = THREE.SRGBColorSpace;

@@ -57,7 +57,7 @@
         grant = resolve;
         parent.postMessage({ type: "apr-game-start" }, "*");
       });
-      const { startGame } = await import("./main.js?v=51cb0f7bd24b26d9");
+      const { startGame } = await import("./main.js?v=cb240510343fb7ac");
       await startGame({ start });
     } catch (error) {
       console.error("The canyon could not start:", error);
