@@ -387,4 +387,15 @@ pre{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:1
 .safety-tool{fill:#fff;stroke:#2C557B;stroke-width:3.04;stroke-linejoin:round}
 
 
+.verification{margin-top:24px}
+.verification-panels{display:flex;align-items:flex-start;gap:34px}
+.verification-panel{flex:var(--w) 1 0%;min-width:0}
+.verification-panel picture{display:block}
+.verification-panel img{width:100%;aspect-ratio:var(--w)/700;min-height:0;mix-blend-mode:multiply}
+.verification-panel figcaption{font-size:15px;line-height:1.45;color:var(--ink);margin-top:4px;text-wrap:balance}
+.verification+.lede{margin-top:56px}
+@media (max-width:760px){.verification{margin-top:20px}.verification-panels{gap:20px}.verification+.lede{margin-top:44px}}
+@media (max-width:600px){.verification-panels{gap:12px}.verification-panel figcaption{font-size:13px;line-height:1.4}}
+
+
 img[data-load-src]{visibility:hidden}
