@@ -1,5 +1,5 @@
-import { mountStory } from "./storyboard.js?v=066abae662cbf9fa";
-import { mountFigure } from "./loop-figure.js?v=066abae662cbf9fa";
+import { mountStory } from "./storyboard.js?v=e39702f978afab47";
+import { mountFigure } from "./loop-figure.js?v=e39702f978afab47";
 window.aprLoad.when(document.querySelector("#storyboard"), "capabilities", mountStory).catch((error) => console.warn("Capability poster remains visible:", error));
 const section = document.querySelector("#agentic-loop");
 const view = section.querySelector(".loop-window");

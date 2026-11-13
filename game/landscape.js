@@ -1,6 +1,6 @@
 import * as THREE from "three";
-import { P, surfaceY } from "./physics.js?v=066abae662cbf9fa";
-import { toon, INK } from "./style.js?v=066abae662cbf9fa";
+import { P, surfaceY } from "./physics.js?v=e39702f978afab47";
+import { toon, INK } from "./style.js?v=e39702f978afab47";
 const materials = /* @__PURE__ */ new Map();
 export function material(color) {
   if (!materials.has(color)) materials.set(color, toon(color));

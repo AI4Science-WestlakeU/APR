@@ -29,7 +29,7 @@ const SCENES = {
   grounding_tolerance: { cx: 760, cy: 660, zoom: 2.7 },
   // The collapse frame is live SVG; its echo is the intact structure (t = 0),
   // so the falling blocks play against the structure as it stood.
-  collapse_echo: { cx: 820, cy: 600, zoom: 2, src: "assets/nearterm/collapse_echo.png?v=066abae662cbf9fa" },
+  collapse_echo: { cx: 820, cy: 600, zoom: 2, src: "assets/nearterm/collapse_echo.png?v=e39702f978afab47" },
   grounding_budget: {
     cx: 718,
     cy: 190,

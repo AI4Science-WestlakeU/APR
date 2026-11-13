@@ -1,4 +1,4 @@
-import { createEcho } from "./nearterm-echo.js?v=066abae662cbf9fa";
+import { createEcho } from "./nearterm-echo.js?v=e39702f978afab47";
 const board = document.querySelector("#missions-board");
 window.aprLoad.when(board, "missions", () => {
   const copy = board.querySelector(".missions-copy");

@@ -1,4 +1,4 @@
-const figureURL = new URL("../assets/construction-loop-web.svg?v=066abae662cbf9fa", import.meta.url);
+const figureURL = new URL("../assets/construction-loop-web.svg?v=e39702f978afab47", import.meta.url);
 const figureRequests = /* @__PURE__ */ new Map();
 export function readFigure(url = figureURL) {
   const key = String(url);
